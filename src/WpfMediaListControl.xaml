@@ -1,0 +1,365 @@
+<UserControl xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="#0A0A0A"
+             Foreground="#F5F5F5"
+             Focusable="True">
+
+    <UserControl.Resources>
+        <!-- ScrollBar Thumbs -->
+        <Style x:Key="LiteTubeScrollThumb" TargetType="{x:Type Thumb}">
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="IsTabStop" Value="False"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type Thumb}">
+                        <Border x:Name="ThumbBorder" Background="#45FFFFFF" CornerRadius="4" Margin="1,0,1,0"/>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ThumbBorder" Property="Background" Value="#85FFFFFF"/>
+                            </Trigger>
+                            <Trigger Property="IsDragging" Value="True">
+                                <Setter TargetName="ThumbBorder" Property="Background" Value="#B5FFFFFF"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Modern Dark Slim ScrollBar (YouTube / OLED style) -->
+        <Style TargetType="{x:Type ScrollBar}">
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Width" Value="8"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type ScrollBar}">
+                        <Grid Background="Transparent">
+                            <Track x:Name="PART_Track" IsDirectionReversed="True">
+                                <Track.Thumb>
+                                    <Thumb Style="{StaticResource LiteTubeScrollThumb}" />
+                                </Track.Thumb>
+                            </Track>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Clean ListBoxItem without default blue selection border -->
+        <Style x:Key="LiteTubeListBoxItem" TargetType="{x:Type ListBoxItem}">
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="Margin" Value="0"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type ListBoxItem}">
+                        <ContentPresenter />
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- =================================================================== -->
+        <!-- 1. GRID ROW TEMPLATE: Virtualized rows containing 1-4 video cards   -->
+        <!-- =================================================================== -->
+        <DataTemplate x:Key="GridRowTemplate">
+            <ItemsControl ItemsSource="{Binding Cards}">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center"/>
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Border Width="{Binding CardWidth}" Height="{Binding CardHeight}"
+                                CornerRadius="8" Background="{Binding BackgroundBrush}" Margin="8,10"
+                                Tag="Card" Cursor="Hand" BorderThickness="{Binding BorderThickness}"
+                                BorderBrush="{Binding BorderBrush}">
+                            <Border.Style>
+                                <Style TargetType="Border">
+                                    <Style.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter Property="Background" Value="#1C1C1C"/>
+                                        </Trigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Border.Style>
+
+                            <Grid>
+                                <!-- ================= 1A. NORMAL VIDEO CARD ================= -->
+                                <Grid Visibility="{Binding VideoVisibility}">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="*"/>
+                                    </Grid.RowDefinitions>
+
+                                    <!-- 16:9 Thumbnail Container -->
+                                    <Border Grid.Row="0" Height="{Binding ThumbHeight}" CornerRadius="8,8,0,0"
+                                            ClipToBounds="True" Background="#161618">
+                                        <Grid>
+                                            <Image Source="{Binding ThumbnailSource}" Stretch="UniformToFill"/>
+                                            <!-- Fallback Icon if thumb not loaded -->
+                                            <TextBlock Text="{Binding PlaceholderIcon}" Foreground="#4A4A58" FontSize="26"
+                                                       FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                       Visibility="{Binding FallbackVisibility}"/>
+                                            <!-- Duration Badge (YouTube translucent black pill) -->
+                                            <Border HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,6,6"
+                                                    Background="{Binding DurationBadgeBackground}" CornerRadius="4" Padding="5,2,5,2"
+                                                    Visibility="{Binding DurationVisibility}">
+                                                <TextBlock Text="{Binding Duration}" Foreground="White" FontSize="11" FontWeight="SemiBold"/>
+                                            </Border>
+                                        </Grid>
+                                    </Border>
+
+                                    <!-- Bottom Info: Avatar + Title + Channel + Favorite -->
+                                    <Grid Grid.Row="1" Margin="10,8,10,8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+
+                                        <!-- Channel Avatar Circle -->
+                                        <Border Grid.Column="0" Width="38" Height="38" CornerRadius="19" VerticalAlignment="Top"
+                                                Background="{Binding AvatarBrush}" Margin="0,2,10,0" Tag="Channel" Cursor="Hand">
+                                            <TextBlock Text="{Binding AvatarInitial}" Foreground="White" FontWeight="Bold" FontSize="14"
+                                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                        </Border>
+
+                                        <!-- Title and Channel Name -->
+                                        <StackPanel Grid.Column="1" VerticalAlignment="Top">
+                                            <TextBlock Text="{Binding Title}" TextWrapping="Wrap" MaxHeight="38"
+                                                       TextTrimming="CharacterEllipsis" FontWeight="SemiBold" FontSize="13"
+                                                       Foreground="{Binding TitleBrush}" LineHeight="18"/>
+                                            <TextBlock Text="{Binding Artist}" TextTrimming="CharacterEllipsis" Foreground="#A0A0A0"
+                                                       FontSize="12" Margin="0,3,0,0" Tag="Channel" Cursor="Hand"/>
+                                        </StackPanel>
+
+                                        <!-- Favorite Button -->
+                                        <Border Grid.Column="2" VerticalAlignment="Bottom" Padding="4" Background="Transparent"
+                                                Tag="Favorite" Cursor="Hand" Visibility="{Binding FavoriteButtonVisibility}">
+                                            <TextBlock Text="{Binding FavoriteIcon}" Foreground="{Binding FavoriteBrush}" FontSize="16"/>
+                                        </Border>
+                                    </Grid>
+                                </Grid>
+
+                                <!-- ================= 1B. CHANNEL BANNER CARD ================= -->
+                                <Grid Visibility="{Binding ChannelVisibility}" Margin="12">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="Auto"/>
+                                        <RowDefinition Height="*"/>
+                                    </Grid.RowDefinitions>
+
+                                    <!-- Centered Big Avatar with Ring -->
+                                    <Border Grid.Row="0" Width="80" Height="80" CornerRadius="40" Background="{Binding AvatarBrush}"
+                                            HorizontalAlignment="Center" Margin="0,16,0,10" BorderBrush="#3EA6FF" BorderThickness="2"
+                                            Tag="Channel" Cursor="Hand">
+                                        <TextBlock Text="{Binding AvatarInitial}" Foreground="White" FontWeight="Bold" FontSize="26"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Border>
+
+                                    <!-- Channel Title + Checkmark -->
+                                    <TextBlock Grid.Row="1" Text="{Binding ChannelDisplayTitle}" Foreground="#F5F5F5"
+                                               FontWeight="Bold" FontSize="15" HorizontalAlignment="Center"
+                                               TextTrimming="CharacterEllipsis" Margin="0,4,0,2"/>
+
+                                    <!-- Subtitle / Subscribers -->
+                                    <TextBlock Grid.Row="2" Text="{Binding Artist}" Foreground="#A0A0A0" FontSize="12"
+                                               HorizontalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,0,0,14"/>
+
+                                    <!-- Access Channel Pill Button -->
+                                    <Border Grid.Row="3" Background="#F1F1F1" CornerRadius="16" Height="32" Width="140"
+                                            HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,10"
+                                            Tag="Channel" Cursor="Hand">
+                                        <TextBlock Text="Acessar Canal" Foreground="#0A0A0A" FontWeight="SemiBold"
+                                                   FontSize="12.5" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Border>
+                                </Grid>
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </DataTemplate>
+
+        <!-- =================================================================== -->
+        <!-- 2. SIDEBAR COMPACT TEMPLATE: YouTube Watch page right sidebar        -->
+        <!-- =================================================================== -->
+        <DataTemplate x:Key="SidebarItemTemplate">
+            <Border CornerRadius="8" Background="{Binding BackgroundBrush}" Margin="2,3" Padding="4"
+                    Tag="Card" Cursor="Hand" BorderThickness="{Binding BorderThickness}" BorderBrush="{Binding BorderBrush}">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Style.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#1C1C1C"/>
+                            </Trigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- 16:9 Thumbnail (136 x 76) -->
+                    <Border Grid.Column="0" Width="136" Height="76" CornerRadius="6" ClipToBounds="True" Background="#161618">
+                        <Grid>
+                            <Image Source="{Binding ThumbnailSource}" Stretch="UniformToFill"/>
+                            <TextBlock Text="{Binding PlaceholderIcon}" Foreground="#4A4A58" FontSize="20"
+                                       FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                       Visibility="{Binding FallbackVisibility}"/>
+                            <Border HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,4,4"
+                                    Background="{Binding DurationBadgeBackground}" CornerRadius="4" Padding="4,1,4,1"
+                                    Visibility="{Binding DurationVisibility}">
+                                <TextBlock Text="{Binding Duration}" Foreground="White" FontSize="11" FontWeight="SemiBold"/>
+                            </Border>
+                        </Grid>
+                    </Border>
+
+                    <!-- Metadata: Title & Channel Name -->
+                    <StackPanel Grid.Column="1" Margin="10,2,4,2">
+                        <TextBlock Text="{Binding Title}" TextWrapping="Wrap" MaxHeight="38" TextTrimming="CharacterEllipsis"
+                                   FontWeight="SemiBold" FontSize="12.5" Foreground="{Binding TitleBrush}" LineHeight="17"/>
+                        <TextBlock Text="{Binding Artist}" TextTrimming="CharacterEllipsis" Foreground="#A0A0A0"
+                                   FontSize="11.5" Margin="0,4,0,0" Tag="Channel" Cursor="Hand"/>
+                    </StackPanel>
+
+                    <!-- Favorite Button -->
+                    <Border Grid.Column="2" VerticalAlignment="Center" Padding="6" Background="Transparent"
+                            Tag="Favorite" Cursor="Hand" Visibility="{Binding FavoriteButtonVisibility}">
+                        <TextBlock Text="{Binding FavoriteIcon}" Foreground="{Binding FavoriteBrush}" FontSize="15"/>
+                    </Border>
+                </Grid>
+            </Border>
+        </DataTemplate>
+
+        <!-- =================================================================== -->
+        <!-- 3. MUSIC ROW TEMPLATE: YouTube Music track list row                  -->
+        <!-- =================================================================== -->
+        <DataTemplate x:Key="MusicRowTemplate">
+            <Border CornerRadius="8" Background="{Binding BackgroundBrush}" Margin="4,2" Padding="4,5"
+                    Tag="Card" Cursor="Hand" BorderThickness="{Binding BorderThickness}" BorderBrush="{Binding BorderBrush}">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Style.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#1C1C1C"/>
+                            </Trigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
+
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="36"/>
+                        <ColumnDefinition Width="82"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Track Index or Playing Indicator -->
+                    <TextBlock Grid.Column="0" Text="{Binding TrackIndicator}" Foreground="{Binding IndicatorBrush}"
+                               FontWeight="SemiBold" FontSize="13" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+
+                    <!-- Thumbnail Container (78 x 46) -->
+                    <Border Grid.Column="1" Width="78" Height="46" CornerRadius="4" ClipToBounds="True" Background="#161618">
+                        <Grid>
+                            <Image Source="{Binding ThumbnailSource}" Stretch="UniformToFill"/>
+                            <TextBlock Text="{Binding PlaceholderIcon}" Foreground="#4A4A58" FontSize="18"
+                                       FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                       Visibility="{Binding FallbackVisibility}"/>
+                            <Border HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,3,3"
+                                    Background="{Binding DurationBadgeBackground}" CornerRadius="3" Padding="3,1,3,1"
+                                    Visibility="{Binding DurationVisibility}">
+                                <TextBlock Text="{Binding Duration}" Foreground="White" FontSize="10" FontWeight="SemiBold"/>
+                            </Border>
+                        </Grid>
+                    </Border>
+
+                    <!-- Title & Artist / Duration Subtitle -->
+                    <StackPanel Grid.Column="2" Margin="12,0,0,0" VerticalAlignment="Center">
+                        <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontWeight="SemiBold"
+                                   FontSize="13" Foreground="{Binding TitleBrush}"/>
+                        <TextBlock Text="{Binding Subtitle}" TextTrimming="CharacterEllipsis" Foreground="#A0A0A0"
+                                   FontSize="11.5" Margin="0,3,0,0" Tag="Channel" Cursor="Hand"/>
+                    </StackPanel>
+
+                    <!-- Quick Action Buttons -->
+                    <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,6,0">
+                        <Border Tag="Favorite" Padding="6,4" Background="Transparent" Margin="2,0" Cursor="Hand"
+                                Visibility="{Binding FavoriteButtonVisibility}">
+                            <TextBlock Text="{Binding FavoriteIcon}" Foreground="{Binding FavoriteBrush}" FontSize="14"/>
+                        </Border>
+                        <Border Tag="Queue" Padding="8,4" Background="#1C1C1C" CornerRadius="4" Margin="4,0" Cursor="Hand"
+                                Visibility="{Binding QueueButtonVisibility}">
+                            <TextBlock Text="+Fila" Foreground="#F5F5F5" FontSize="11" FontWeight="SemiBold"/>
+                        </Border>
+                        <Border Tag="Video" Padding="6,4" Background="#182C46" CornerRadius="4" Margin="4,0" Cursor="Hand"
+                                Visibility="{Binding VideoButtonVisibility}">
+                            <TextBlock Text="🎬" Foreground="#6EC3FF" FontSize="12"/>
+                        </Border>
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </DataTemplate>
+    </UserControl.Resources>
+
+    <!-- Main Container Grid -->
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Hardware-Accelerated Virtualized ListBox -->
+        <ListBox Grid.Row="0" x:Name="MediaListBox"
+                 Background="Transparent"
+                 BorderThickness="0"
+                 Padding="4"
+                 Focusable="True"
+                 ItemContainerStyle="{StaticResource LiteTubeListBoxItem}"
+                 VirtualizingPanel.IsVirtualizing="True"
+                 VirtualizingPanel.VirtualizationMode="Recycling"
+                 VirtualizingPanel.ScrollUnit="Pixel"
+                 ScrollViewer.CanContentScroll="True"
+                 ScrollViewer.PanningMode="VerticalOnly"
+                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                 ScrollViewer.VerticalScrollBarVisibility="Auto"/>
+
+        <!-- Load More Footer (Visible when HasMoreItems or IsLoadingMore) -->
+        <Border Grid.Row="1" x:Name="FooterPanel" Height="42" Margin="10,8" Background="#1C1C1C"
+                CornerRadius="21" HorizontalAlignment="Center" Padding="24,0" Tag="LoadMore" Cursor="Hand"
+                Visibility="Collapsed">
+            <Border.Style>
+                <Style TargetType="Border">
+                    <Style.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter Property="Background" Value="#2A2A2A"/>
+                        </Trigger>
+                    </Style.Triggers>
+                </Style>
+            </Border.Style>
+            <TextBlock x:Name="FooterText" Text="➕ Carregar mais vídeos (ou continue rolando)"
+                       Foreground="#F5F5F5" FontSize="12.5" FontWeight="SemiBold"
+                       VerticalAlignment="Center" HorizontalAlignment="Center"/>
+        </Border>
+
+        <!-- Empty State Message -->
+        <Border Grid.Row="0" x:Name="EmptyStatePanel" Visibility="Collapsed" HorizontalAlignment="Center"
+                VerticalAlignment="Center" Margin="24">
+            <TextBlock x:Name="EmptyStateText" Text="Pesquise vídeos, canais ou músicas na barra de busca superior do YouTube."
+                       Foreground="#8C8C8C" FontSize="13.5" TextWrapping="Wrap" TextAlignment="Center" MaxWidth="440" LineHeight="20"/>
+        </Border>
+    </Grid>
+</UserControl>

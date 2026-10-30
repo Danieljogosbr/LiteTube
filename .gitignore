@@ -1,0 +1,18 @@
+# Caches e dados de execução locais
+data/
+logs/
+.tmp.driveupload/
+
+# Arquivos de compilação temporários e depuração
+bin/Debug/
+bin/Release/
+obj/
+*.old.exe
+*.pdb
+
+# Binários pesados de terceiros (>100MB - excedem o limite estrito do GitHub)
+bin/ffmpeg.exe
+bin/ffprobe.exe
+
+# Diretório de rascunho
+scratch/

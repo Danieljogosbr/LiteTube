@@ -1,0 +1,3400 @@
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.IO;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+
+namespace LiteTube
+{
+    /// <summary>
+    /// YouTube-Inspired Video Environment (▶ YouTube) with:
+    /// - Authentic YouTube Dark Layout (#0F0F0F), Filter Chips (Tudo | Vídeos | Canais) & Infinite Scroll
+    /// - Isolated Official Channel Page with 3 YouTube Tabs: Início ("home"), Vídeos ("videos"), Playlists ("playlists")
+    /// - Watch Page with Player, Full-Width Red/Gray Buffer SeekBar, Watch Metadata Panel below player, and Compact Right Sidebar
+    /// - LibVLC Direct3D 11 Native HWND Hardware-Accelerated Streaming with Unthrottled Loopback Delivery
+    /// </summary>
+    public class VideoEnvironmentControl : UserControl
+    {
+        private readonly AppConfig _config;
+        private readonly YouTubeService _ytService;
+        private readonly AudioEngine _musicEngine;
+        private readonly Form _parentForm;
+
+        // Official YouTube Dark Palette (Preto Puro Neutro - Sem tom azulado)
+        private readonly Color BgDark = Theme.Bg;
+        private readonly Color BgPanel = Theme.Surface;
+        private readonly Color BgCard = Theme.SurfaceHigh;
+        private readonly Color BgChipHover = Color.FromArgb(36, 36, 36);
+        private readonly Color YouTubeRed = Theme.Accent;
+        private readonly Color AccentBlue = Theme.Blue;
+        private readonly Color AccentGreen = Color.FromArgb(46, 204, 113);
+        private readonly Color TextPrimary = Theme.TextMain;
+        private readonly Color TextSecondary = Theme.TextDim;
+
+        // YouTube Official Left Sidebar
+        // YouTube Official Left Sidebar (Início | Inscrições | Você | Histórico)
+        private Panel _sidebar;
+        private Button _navHome;
+        private Button _navSubscriptions;
+        private Button _navYou;
+        private Button _navHistory;
+        private Button _navBackToPlayer;
+        private Button _navOpenUrl;
+        private Label _lblSidebarAccount;
+        private string _activeNavSection = "home"; // "home", "subs", "you", "history", "search"
+
+        // Main Center Panel & Top Search Filter Chips Bar
+        private Panel _mainContentPanel;
+        private Panel _topChipsBar;
+        private Button _chipFilterAll;
+        private Button _chipFilterVideos;
+        private Button _chipFilterChannels;
+        private Button _chipHideShorts;
+        private Button _chipToggleSponsorBlock;
+        private string _activeSearchChip = "all";
+        private Label _lblBufferBadge;
+        private List<SponsorSegment> _currentSponsorSegments = new List<SponsorSegment>();
+        private string _lastSkippedSponsorUuid = null;
+
+        // View 1: YouTube Home/Search Grid Catalog + YouTube Channel Page Header
+        private Panel _catalogPanel;
+        private Panel _channelBannerPanel;
+        private Button _btnBackFromChannel;
+        private PictureBox _picChannelAvatar;
+        private Label _lblChannelBannerTitle;
+        private Label _lblChannelBannerSub;
+        private Button _btnChannelTabHome;
+        private Button _btnChannelTabVideos;
+        private Button _btnChannelTabPlaylists;
+        private Panel _tabUnderlineIndicator;
+        private Button _btnImportOpenedPlaylist;
+        private Label _lblCatalogHeader;
+        private MediaCardListControl _catalogGridCards;
+
+        // View 2: YouTube Watch Page (Center Player + Watch Metadata Below + Right Compact Related Sidebar)
+        private Panel _watchPagePanel;
+        private Panel _rightRelatedPanel;
+        private Label _lblRelatedHeader;
+        private MediaCardListControl _relatedRowCards;
+
+        // Video Stage (Inside Watch Page)
+        private Panel _playerStagePanel;
+
+        // LibVLC Native Player Engine
+        private Panel _videoCanvasContainer;
+        private Panel _vlcCanvas;
+        private VlcPlayer _vlcPlayer;
+
+        private Panel _loadingOverlay;
+        private Label _lblLoadingTitle;
+        private Label _lblLoadingProgress;
+        private Button _btnCancelLoad;
+
+        // Player Control Bar (Directly below video canvas: Full-width Red/Gray SeekBar + Transport + Quality + Theater/Fullscreen + Audio)
+        private Panel _videoBottomBar;
+        private PictureBox _customSeekBar;
+        private Button _btnVidPlayPause;
+        private Button _btnVidNext;
+        private Button _btnVidBack10;
+        private Button _btnVidFwd10;
+        private Button _btnVidStop;
+        private Label _lblVidTimeCombined;
+        private Button _btnQ360;
+        private Button _btnQ480;
+        private Button _btnQ720;
+        private Button _btnQ1080;
+        private Button _btnBottomTheater;
+        private Button _btnBottomFullscreen;
+
+        // Independent Video Audio Regulator Controls
+        private Button _btnVidMute;
+        private PictureBox _vidVolCustomBar;
+        private Button _btnVidAudioDialog;
+
+        private bool _isHoveringSeek = false;
+        private int _hoverSeekMouseX = -1;
+
+        // YouTube Watch Metadata Bar (Below Player Control Bar: Video Title, Channel Avatar, Channel Name, Acessar Canal, Salvar)
+        private Panel _watchMetaPanel;
+        private Label _lblVideoTitle;
+        private PictureBox _picWatchChannelAvatar;
+        private Label _lblVideoChannel;
+        private Label _lblVideoSubInfo;
+        private Button _btnOpenCurrentChannel;
+        private Button _btnSaveVideo;
+        private Button _btnBackToCatalogFromWatch;
+
+        // State for Feeds, Search & Infinite Scroll
+        private List<TrackItem> _homeVideos = new List<TrackItem>();
+        private List<TrackItem> _subscriptionsVideos = new List<TrackItem>();
+        private List<TrackItem> _historyVideos = new List<TrackItem>();
+        private List<TrackItem> _searchVideos = new List<TrackItem>();
+        private string _searchQueryLabel = "";
+        private string _searchContinuationToken = "";
+        private bool _isSavedVideosView = false;
+
+        // Channel State ("home", "videos", "playlists", "playlist_items")
+        private bool _isChannelView = false;
+        private string _activeChannelId = "";
+        private string _activeChannelName = "";
+        private string _activeChannelAvatarUrl = "";
+        private string _activeChannelSubscribers = "";
+        private string _activeChannelTab = "home";
+        private string _channelContinuationToken = "";
+        private List<TrackItem> _channelCurrentItems = new List<TrackItem>();
+        private TrackItem _openedChannelPlaylist = null;
+        private List<TrackItem> _openedPlaylistVideos = new List<TrackItem>();
+
+        private bool _isLoadingMore = false;
+
+        // Playback & Progressive Streaming State
+        private TrackItem _currentVideo;
+        private ProgressiveVideoSession _activeProgressiveSession;
+        private double _dragScrubSeconds = 0.0;
+
+        private bool _isPlaying = false;
+        private bool _isLoading = false;
+        private bool _isDraggingSeek = false;
+        private bool _isDraggingVolBar = false;
+        private bool _isHoveringVolBar = false;
+        private bool _isTheaterMode = false;
+        private bool _isFullscreen = false;
+        private FormWindowState _prevWindowState;
+        private FormBorderStyle _prevBorderStyle;
+        private DateTime _lastMouseActivityUtc = DateTime.UtcNow;
+
+        public event Action<string> StatusNotification;
+        public event Action<bool> FullscreenChanged;
+        public event Action PlaylistImportedToLibrary;
+
+        public VideoEnvironmentControl(AppConfig config, YouTubeService ytService, AudioEngine musicEngine, Form parentForm)
+        {
+            _config = config;
+            _ytService = ytService;
+            _musicEngine = musicEngine;
+            _parentForm = parentForm;
+
+            Dock = DockStyle.Fill;
+            BackColor = BgDark;
+            ForeColor = TextPrimary;
+            Font = new Font("Segoe UI", 9.5f, FontStyle.Regular);
+            DoubleBuffered = true;
+
+            if (VideoProfile.Volume < 0.35) VideoProfile.Volume = 0.85;
+            VideoProfile.IsMuted = false;
+
+            BuildUI();
+            WireEvents();
+            UpdateQualityButtons();
+            UpdateVideoAudioUI();
+            var _ = SwitchToNavSectionAsync("home");
+        }
+
+        public AudioProfile VideoProfile { get { return _config.VideoAudio; } }
+        public bool IsVideoPlaying { get { return _isPlaying || (_vlcPlayer != null && _vlcPlayer.IsPlaying); } }
+        public TrackItem CurrentVideo { get { return _currentVideo; } }
+        public bool IsFullscreen { get { return _isFullscreen; } }
+        public bool IsTheaterMode { get { return _isTheaterMode; } }
+
+        private void BuildUI()
+        {
+            // ====================================================================
+            // 1. YOUTUBE OFFICIAL LEFT SIDEBAR (INÍCIO | INSCRIÇÕES | VOCÊ | HISTÓRICO)
+            // ====================================================================
+            _sidebar = new Panel
+            {
+                Dock = DockStyle.Left,
+                Width = 205,
+                BackColor = Color.FromArgb(15, 15, 15),
+                Padding = new Padding(8, 10, 8, 10)
+            };
+
+            int sideY = 10;
+            _navHome = CreateYouTubeSidebarButton("Início", ref sideY);
+            _navSubscriptions = CreateYouTubeSidebarButton("Inscrições", ref sideY);
+            _navYou = CreateYouTubeSidebarButton("Você", ref sideY);
+            _navHistory = CreateYouTubeSidebarButton("Histórico", ref sideY);
+
+            sideY += 6;
+            sideY += 6;
+            var sideDivider = new Panel
+            {
+                Location = new Point(10, sideY),
+                Size = new Size(184, 1),
+                BackColor = Color.FromArgb(38, 38, 38)
+            };
+            _sidebar.Controls.Add(sideDivider);
+            sideY += 10;
+
+            _navBackToPlayer = CreateYouTubeSidebarButton("Assistindo", ref sideY);
+            _navBackToPlayer.Visible = false;
+
+            _navOpenUrl = CreateYouTubeSidebarButton("Abrir Link", ref sideY);
+
+            _lblSidebarAccount = new Label
+            {
+                Text = GetAccountStatusLabel(),
+                Font = new Font("Segoe UI Semibold", 8.2f, FontStyle.Bold),
+                ForeColor = HasValidAuth() ? Color.FromArgb(0, 212, 130) : Theme.TextDim,
+                Dock = DockStyle.Bottom,
+                Height = 32,
+                TextAlign = ContentAlignment.MiddleCenter,
+                Cursor = Cursors.Hand,
+                BackColor = Theme.Surface
+            };
+            _lblSidebarAccount.Click += (s, e) => ShowGoogleAuthDialog();
+            _sidebar.Controls.Add(_lblSidebarAccount);
+
+            // ====================================================================
+            // 2. MAIN CENTER CONTENT & SEARCH FILTER CHIPS
+            // ====================================================================
+            _mainContentPanel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = BgDark
+            };
+
+            _topChipsBar = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 44,
+                BackColor = BgDark,
+                Padding = new Padding(14, 6, 14, 6),
+                Visible = false
+            };
+
+            _chipFilterAll = CreateChipButton("Tudo", 14, 6, 62, 32, true);
+            _chipFilterVideos = CreateChipButton("Vídeos", 82, 6, 72, 32, false);
+            _chipFilterChannels = CreateChipButton("Canais", 160, 6, 76, 32, false);
+            _chipHideShorts = CreateChipButton(_config.HideShorts ? "🚫 Shorts: Ocultos" : "▶ Shorts: Visíveis", 244, 6, 134, 32, _config.HideShorts);
+            _chipToggleSponsorBlock = CreateChipButton(_config.AutoSkipSponsors ? "🛡️ SponsorBlock: ON" : "🛡️ SponsorBlock: OFF", 384, 6, 150, 32, _config.AutoSkipSponsors);
+
+            _lblBufferBadge = new Label
+            {
+                Text = "⚡ Streaming Direct3D • LibVLC",
+                Font = new Font("Segoe UI", 8.5f),
+                ForeColor = TextSecondary,
+                Location = new Point(540, 12),
+                Size = new Size(350, 20),
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                TextAlign = ContentAlignment.MiddleRight,
+                AutoEllipsis = true
+            };
+
+            _topChipsBar.Controls.AddRange(new Control[]
+            {
+                _chipFilterAll, _chipFilterVideos, _chipFilterChannels, _chipHideShorts, _chipToggleSponsorBlock, _lblBufferBadge
+            });
+
+            // ====================================================================
+            // 3. VIEW 1: YOUTUBE CATALOG GRID + OFFICIAL CHANNEL HEADER
+            // ====================================================================
+            _catalogPanel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = BgDark,
+                Padding = new Padding(16, 4, 16, 10)
+            };
+
+            // YouTube-Inspired Channel Page Header (Avatar + Title + @handle/Subs + 3 Tabs: Início, Vídeos, Playlists)
+            _channelBannerPanel = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 132,
+                BackColor = BgDark,
+                Visible = false
+            };
+
+            _btnBackFromChannel = CreateFlatButton("⬅ Voltar aos Resultados", 8, 10, 168, 30, BgCard);
+            _btnBackFromChannel.Font = new Font("Segoe UI Semibold", 8.8f, FontStyle.Bold);
+
+            _picChannelAvatar = new PictureBox
+            {
+                Location = new Point(190, 10),
+                Size = new Size(68, 68),
+                BackColor = BgDark
+            };
+            _picChannelAvatar.Paint += OnPaintChannelAvatar;
+
+            _lblChannelBannerTitle = new Label
+            {
+                Text = "Canal do YouTube",
+                Font = new Font("Segoe UI", 16f, FontStyle.Bold),
+                ForeColor = TextPrimary,
+                Location = new Point(272, 12),
+                Size = new Size(560, 32),
+                AutoEllipsis = true
+            };
+
+            _lblChannelBannerSub = new Label
+            {
+                Text = "@canal • Inscritos • Conteúdo oficial exclusivo deste canal",
+                Font = new Font("Segoe UI", 9.2f),
+                ForeColor = TextSecondary,
+                Location = new Point(274, 46),
+                Size = new Size(560, 22),
+                AutoEllipsis = true
+            };
+
+            // 3 YouTube Channel Tabs: Início | Vídeos | Playlists
+            int tabY = 88;
+            _btnChannelTabHome = CreateChannelTabButton("Início", 14, tabY, 96);
+            _btnChannelTabVideos = CreateChannelTabButton("Vídeos", 116, tabY, 96);
+            _btnChannelTabPlaylists = CreateChannelTabButton("Playlists", 218, tabY, 106);
+
+            _tabUnderlineIndicator = new Panel
+            {
+                Location = new Point(14, 124),
+                Size = new Size(96, 3),
+                BackColor = TextPrimary
+            };
+
+            var bottomDivider = new Panel
+            {
+                Dock = DockStyle.Bottom,
+                Height = 1,
+                BackColor = Color.FromArgb(45, 45, 45)
+            };
+
+            _btnImportOpenedPlaylist = CreateFlatButton("📥 Salvar Playlist na Biblioteca", 340, tabY + 2, 210, 32, YouTubeRed);
+            _btnImportOpenedPlaylist.Font = new Font("Segoe UI Semibold", 9f, FontStyle.Bold);
+            _btnImportOpenedPlaylist.Visible = false;
+
+            _channelBannerPanel.Controls.AddRange(new Control[]
+            {
+                _btnBackFromChannel, _picChannelAvatar, _lblChannelBannerTitle, _lblChannelBannerSub,
+                _btnChannelTabHome, _btnChannelTabVideos, _btnChannelTabPlaylists,
+                _tabUnderlineIndicator, _btnImportOpenedPlaylist, bottomDivider
+            });
+
+            _lblCatalogHeader = new Label
+            {
+                Dock = DockStyle.Top,
+                Height = 28,
+                Text = "Pesquise vídeos ou canais no topo — clique no vídeo para assistir ou no nome do canal para explorar",
+                Font = new Font("Segoe UI Semibold", 10f, FontStyle.Bold),
+                ForeColor = TextSecondary,
+                Padding = new Padding(4, 4, 0, 0)
+            };
+
+            _catalogGridCards = new MediaCardListControl
+            {
+                Dock = DockStyle.Fill,
+                IsGridMode = true,
+                IsMusicEnvironment = false,
+                SingleClickActivates = true,
+                AccentColor = YouTubeRed,
+                IsFavoriteOrSavedCheck = id => _config.IsSavedVideo(id)
+            };
+
+            _catalogPanel.Controls.Add(_catalogGridCards);
+            _catalogPanel.Controls.Add(_lblCatalogHeader);
+            _catalogPanel.Controls.Add(_channelBannerPanel);
+
+            // ====================================================================
+            // 3. VIEW 2: YOUTUBE WATCH PAGE (PLAYER + METADATA BELOW + COMPACT RIGHT SIDEBAR)
+            // ====================================================================
+            _watchPagePanel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = BgDark,
+                Visible = false
+            };
+
+            // 3a. Right Related Videos Sidebar (YouTube Compact Watch Sidebar)
+            _rightRelatedPanel = new Panel
+            {
+                Dock = DockStyle.Right,
+                Width = 376,
+                BackColor = BgDark,
+                Padding = new Padding(4, 6, 12, 6)
+            };
+
+            _lblRelatedHeader = new Label
+            {
+                Dock = DockStyle.Top,
+                Height = 28,
+                Text = "  Próximos vídeos",
+                Font = new Font("Segoe UI Semibold", 10.5f, FontStyle.Bold),
+                ForeColor = TextPrimary,
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+
+            _relatedRowCards = new MediaCardListControl
+            {
+                Dock = DockStyle.Fill,
+                IsGridMode = false,
+                IsCompactSidebarMode = true,
+                IsMusicEnvironment = false,
+                SingleClickActivates = true,
+                AccentColor = YouTubeRed,
+                IsFavoriteOrSavedCheck = id => _config.IsSavedVideo(id)
+            };
+
+            _rightRelatedPanel.Controls.Add(_relatedRowCards);
+            _rightRelatedPanel.Controls.Add(_lblRelatedHeader);
+
+            // 3b. Center Watch Column (Video Canvas + Player Controls + YouTube Watch Metadata Below)
+            _playerStagePanel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = BgDark,
+                Padding = new Padding(14, 6, 8, 8)
+            };
+
+            // YouTube Watch Metadata Panel (Docked at Bottom of Watch Column, below Player Controls)
+            _watchMetaPanel = new Panel
+            {
+                Dock = DockStyle.Bottom,
+                Height = 92,
+                BackColor = Theme.Bg,
+                Padding = new Padding(8, 6, 8, 4)
+            };
+
+            _lblVideoTitle = new Label
+            {
+                Text = "Selecione um vídeo para assistir",
+                Font = new Font("Segoe UI Semibold", 13.5f, FontStyle.Bold),
+                ForeColor = Theme.TextMain,
+                Location = new Point(8, 6),
+                Size = new Size(640, 28),
+                AutoEllipsis = true
+            };
+
+            _picWatchChannelAvatar = new PictureBox
+            {
+                Location = new Point(8, 40),
+                Size = new Size(42, 42),
+                BackColor = Theme.Bg,
+                Cursor = Cursors.Hand
+            };
+            _picWatchChannelAvatar.Paint += OnPaintWatchChannelAvatar;
+
+            _lblVideoChannel = new Label
+            {
+                Text = "Canal do YouTube",
+                Font = new Font("Segoe UI Semibold", 10.5f, FontStyle.Bold),
+                ForeColor = Theme.TextMain,
+                Location = new Point(58, 40),
+                Size = new Size(260, 20),
+                Cursor = Cursors.Hand,
+                AutoEllipsis = true
+            };
+
+            _lblVideoSubInfo = new Label
+            {
+                Text = "Clique para acessar o canal oficial",
+                Font = new Font("Segoe UI", 8.8f),
+                ForeColor = Theme.TextDim,
+                Location = new Point(58, 62),
+                Size = new Size(260, 18),
+                Cursor = Cursors.Hand,
+                AutoEllipsis = true
+            };
+
+            _btnOpenCurrentChannel = CreateFlatButton("Acessar Canal", 328, 44, 120, 34, Theme.TextMain, 17, Color.Empty);
+            _btnOpenCurrentChannel.ForeColor = Theme.Bg;
+            _btnOpenCurrentChannel.Font = new Font("Segoe UI Semibold", 9f, FontStyle.Bold);
+
+            var watchRightActions = new Panel
+            {
+                Size = new Size(215, 36),
+                Location = new Point(460, 40),
+                Anchor = AnchorStyles.Top | AnchorStyles.Right
+            };
+
+            _btnSaveVideo = CreateFlatButton("Salvar", 0, 2, 95, 34, Theme.SurfaceHigh, 17, Theme.Border);
+            _btnSaveVideo.Font = new Font("Segoe UI Semibold", 9f, FontStyle.Bold);
+
+            _btnBackToCatalogFromWatch = CreateFlatButton("Ver Grade", 105, 2, 105, 34, Theme.SurfaceHigh, 17, Theme.Border);
+            _btnBackToCatalogFromWatch.Font = new Font("Segoe UI Semibold", 9f, FontStyle.Bold);
+
+            watchRightActions.Controls.Add(_btnSaveVideo);
+            watchRightActions.Controls.Add(_btnBackToCatalogFromWatch);
+
+            _watchMetaPanel.Controls.AddRange(new Control[]
+            {
+                _lblVideoTitle, _picWatchChannelAvatar, _lblVideoChannel, _lblVideoSubInfo,
+                _btnOpenCurrentChannel, watchRightActions
+            });
+
+            _watchMetaPanel.Resize += (s, e) =>
+            {
+                _lblVideoTitle.Width = Math.Max(200, _watchMetaPanel.Width - 16);
+                watchRightActions.Left = Math.Max(435, _watchMetaPanel.Width - watchRightActions.Width - 8);
+            };
+
+            // Player Control Bar (Directly below video canvas: Top Full-Width SeekBar + Transport + Quality + Theater/Fullscreen + Audio)
+            _videoBottomBar = new Panel
+            {
+                Dock = DockStyle.Bottom,
+                Height = 52,
+                BackColor = Color.FromArgb(15, 15, 15)
+            };
+
+            // Top Full-Width YouTube Red + Buffer Progress Seek Bar
+            _customSeekBar = new PictureBox
+            {
+                Dock = DockStyle.Top,
+                Height = 14,
+                BackColor = Color.FromArgb(15, 15, 15),
+                Cursor = Cursors.Hand
+            };
+
+            var controlsRow = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.FromArgb(15, 15, 15)
+            };
+
+            // Left Transport Controls (YouTube 1:1 Frameless with Vector Icons)
+            _btnVidPlayPause = CreateFlatButton("\u25B6", 6, 1, 38, 36, Color.Transparent, 18, Color.Empty);
+            _btnVidPlayPause.Font = new Font("Segoe UI", 12f, FontStyle.Regular);
+            _btnVidPlayPause.ForeColor = Color.White;
+
+            _btnVidNext = CreateFlatButton("\u25B6\u275A", 46, 1, 34, 36, Color.Transparent, 17, Color.Empty);
+            _btnVidNext.Font = new Font("Segoe UI", 9f, FontStyle.Bold);
+            _btnVidNext.ForeColor = Color.White;
+
+            _btnVidBack10 = CreateFlatButton("-10", 82, 1, 32, 36, Color.Transparent, 16, Color.Empty);
+            _btnVidBack10.Font = new Font("Segoe UI Semibold", 8f, FontStyle.Bold);
+            _btnVidBack10.ForeColor = Color.FromArgb(220, 220, 220);
+
+            _btnVidFwd10 = CreateFlatButton("+10", 116, 1, 32, 36, Color.Transparent, 16, Color.Empty);
+            _btnVidFwd10.Font = new Font("Segoe UI Semibold", 8f, FontStyle.Bold);
+            _btnVidFwd10.ForeColor = Color.FromArgb(220, 220, 220);
+
+            _btnVidStop = CreateFlatButton("", 0, 0, 0, 0, Color.Transparent, 0, Color.Empty);
+            _btnVidStop.Visible = false;
+
+            // Independent Video Volume Controls right next to transport (YouTube Desktop White Slider)
+            _btnVidMute = CreateFlatButton("\uE15D", 152, 1, 34, 36, Color.Transparent, 17, Color.Empty);
+            _btnVidMute.Font = new Font("Segoe UI Symbol", 11.5f, FontStyle.Regular);
+            _btnVidMute.ForeColor = Color.White;
+
+            _vidVolCustomBar = new PictureBox
+            {
+                Location = new Point(188, 1),
+                Size = new Size(56, 36),
+                BackColor = Color.FromArgb(15, 15, 15),
+                Cursor = Cursors.Hand
+            };
+
+            _lblVidTimeCombined = new Label
+            {
+                Text = "0:00 / 0:00",
+                ForeColor = Color.White,
+                Font = new Font("Segoe UI Semibold", 8.8f),
+                Location = new Point(248, 8),
+                Size = new Size(125, 20),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+
+            // Right Player Settings (Quality pills + EQ + Theater Mode + Fullscreen)
+            var rightPlayerControls = new Panel
+            {
+                Dock = DockStyle.Right,
+                Width = 320,
+                BackColor = Color.FromArgb(15, 15, 15)
+            };
+
+            _btnQ360 = CreateFlatButton("360p", 2, 5, 42, 28, Color.Transparent, 14, Color.Empty);
+            _btnQ360.Font = new Font("Segoe UI Semibold", 8.2f, FontStyle.Bold);
+
+            _btnQ480 = CreateFlatButton("480p", 46, 5, 42, 28, Color.Transparent, 14, Color.Empty);
+            _btnQ480.Font = new Font("Segoe UI Semibold", 8.2f, FontStyle.Bold);
+
+            _btnQ720 = CreateFlatButton("720p", 90, 5, 52, 28, Color.Transparent, 14, Color.Empty);
+            _btnQ720.Font = new Font("Segoe UI Semibold", 8.2f, FontStyle.Bold);
+
+            _btnQ1080 = CreateFlatButton("1080p", 144, 5, 60, 28, Color.Transparent, 14, Color.Empty);
+            _btnQ1080.Font = new Font("Segoe UI Semibold", 8.2f, FontStyle.Bold);
+
+            _btnVidAudioDialog = CreateFlatButton("EQ", 208, 1, 34, 36, Color.Transparent, 17, Color.Empty);
+            _btnVidAudioDialog.Font = new Font("Segoe UI Semibold", 8.2f, FontStyle.Bold);
+            _btnVidAudioDialog.ForeColor = Color.FromArgb(220, 220, 220);
+
+            _btnBottomTheater = CreateFlatButton("\u25AD", 244, 1, 34, 36, Color.Transparent, 17, Color.Empty);
+            _btnBottomTheater.Font = new Font("Segoe UI", 12f, FontStyle.Regular);
+            _btnBottomTheater.ForeColor = Color.White;
+
+            _btnBottomFullscreen = CreateFlatButton("\u26F6", 280, 1, 34, 36, Color.Transparent, 17, Color.Empty);
+            _btnBottomFullscreen.Font = new Font("Segoe UI Symbol", 12f, FontStyle.Regular);
+            _btnBottomFullscreen.ForeColor = Color.White;
+
+            rightPlayerControls.Controls.AddRange(new Control[]
+            {
+                _btnQ360, _btnQ480, _btnQ720, _btnQ1080, _btnVidAudioDialog, _btnBottomTheater, _btnBottomFullscreen
+            });
+
+            controlsRow.Controls.AddRange(new Control[]
+            {
+                _btnVidPlayPause, _btnVidNext, _btnVidBack10, _btnVidFwd10,
+                _btnVidMute, _vidVolCustomBar,
+                _lblVidTimeCombined, rightPlayerControls
+            });
+
+            var playerToolTips = new ToolTip();
+            playerToolTips.SetToolTip(_btnVidPlayPause, "Reproduzir / Pausar (k)");
+            playerToolTips.SetToolTip(_btnVidNext, "Próximo vídeo (Shift+N)");
+            playerToolTips.SetToolTip(_btnVidBack10, "Voltar 10 segundos (j / ←)");
+            playerToolTips.SetToolTip(_btnVidFwd10, "Avançar 10 segundos (l / →)");
+            playerToolTips.SetToolTip(_btnVidMute, "Ativar / Desativar som (m)");
+            playerToolTips.SetToolTip(_vidVolCustomBar, "Volume do vídeo (Roda do mouse)");
+            playerToolTips.SetToolTip(_btnVidAudioDialog, "Equalizador de Áudio e Ganho");
+            playerToolTips.SetToolTip(_btnBottomTheater, "Modo Teatro (t)");
+            playerToolTips.SetToolTip(_btnBottomFullscreen, "Tela Inteira (f)");
+            playerToolTips.SetToolTip(_btnQ360, "Qualidade 360p");
+            playerToolTips.SetToolTip(_btnQ480, "Qualidade 480p");
+            playerToolTips.SetToolTip(_btnQ720, "Qualidade 720p HD");
+            playerToolTips.SetToolTip(_btnQ1080, "Qualidade 1080p Full HD");
+
+            _videoBottomBar.Controls.Add(controlsRow);
+            _videoBottomBar.Controls.Add(_customSeekBar);
+
+            _videoCanvasContainer = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.Black
+            };
+
+            _vlcCanvas = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.Black
+            };
+            _vlcCanvas.Click += (s, e) => TogglePlayPause();
+            _vlcCanvas.DoubleClick += (s, e) => ToggleFullscreen(!_isFullscreen);
+            _vlcCanvas.MouseMove += (s, e) =>
+            {
+                _lastMouseActivityUtc = DateTime.UtcNow;
+                if (_isFullscreen && !_videoBottomBar.Visible)
+                {
+                    _videoBottomBar.Visible = true;
+                }
+            };
+            _vlcCanvas.HandleCreated += (s, e) => EnsureVlcPlayer();
+
+            _loadingOverlay = new Panel
+            {
+                Size = new Size(440, 126),
+                BackColor = Color.FromArgb(24, 24, 24),
+                Visible = false
+            };
+
+            _lblLoadingTitle = new Label
+            {
+                Text = "Iniciando streaming LibVLC...",
+                Font = new Font("Segoe UI Semibold", 10f, FontStyle.Bold),
+                ForeColor = TextPrimary,
+                Location = new Point(16, 14),
+                Size = new Size(408, 24),
+                TextAlign = ContentAlignment.MiddleCenter,
+                AutoEllipsis = true
+            };
+
+            _lblLoadingProgress = new Label
+            {
+                Text = "Conectando diretamente aos fluxos de áudio e vídeo...",
+                Font = new Font("Segoe UI", 9f),
+                ForeColor = AccentBlue,
+                Location = new Point(16, 44),
+                Size = new Size(408, 24),
+                TextAlign = ContentAlignment.MiddleCenter,
+                AutoEllipsis = true
+            };
+
+            _btnCancelLoad = CreateFlatButton("✖ Cancelar", 165, 78, 110, 32, YouTubeRed);
+            _loadingOverlay.Controls.AddRange(new Control[] { _lblLoadingTitle, _lblLoadingProgress, _btnCancelLoad });
+
+            _videoCanvasContainer.Controls.Add(_loadingOverlay);
+            _videoCanvasContainer.Controls.Add(_vlcCanvas);
+            _videoCanvasContainer.Resize += (s, e) => CenterLoadingOverlay();
+
+            _playerStagePanel.Controls.Add(_videoCanvasContainer);
+            _playerStagePanel.Controls.Add(_videoBottomBar);
+            _playerStagePanel.Controls.Add(_watchMetaPanel);
+
+            _watchPagePanel.Controls.Add(_playerStagePanel);
+            _watchPagePanel.Controls.Add(_rightRelatedPanel);
+
+            _mainContentPanel.Controls.Add(_catalogPanel);
+            _mainContentPanel.Controls.Add(_watchPagePanel);
+            _mainContentPanel.Controls.Add(_topChipsBar);
+
+            Controls.Add(_mainContentPanel);
+            Controls.Add(_sidebar);
+
+            UpdateSavedVideosCount();
+        }
+
+        private void OnPaintChannelAvatar(object sender, PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.Clear(BgDark);
+
+            Rectangle rect = new Rectangle(2, 2, 64, 64);
+            Image avatar = null;
+            if (!string.IsNullOrEmpty(_activeChannelId) || !string.IsNullOrEmpty(_activeChannelAvatarUrl))
+            {
+                string key = "ch_" + (!string.IsNullOrEmpty(_activeChannelId) ? _activeChannelId : _activeChannelName);
+                avatar = ThumbnailCache.GetOrRequestThumbnail(key, _activeChannelAvatarUrl, () =>
+                {
+                    SafeInvoke(() => _picChannelAvatar.Invalidate());
+                });
+            }
+
+            if (avatar != null)
+            {
+                using (GraphicsPath gp = new GraphicsPath())
+                {
+                    gp.AddEllipse(rect);
+                    Region oldClip = g.Clip;
+                    g.SetClip(gp);
+                    g.DrawImage(avatar, rect);
+                    g.Clip = oldClip;
+                }
+            }
+            else
+            {
+                using (var br = new SolidBrush(Color.FromArgb(200, 30, 55)))
+                {
+                    g.FillEllipse(br, rect);
+                }
+                string initial = !string.IsNullOrEmpty(_activeChannelName) ? _activeChannelName.Substring(0, 1).ToUpper() : "C";
+                using (var f = new Font("Segoe UI", 20f, FontStyle.Bold))
+                {
+                    TextRenderer.DrawText(g, initial, f, rect, Color.White,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                }
+            }
+        }
+
+        private void OnPaintWatchChannelAvatar(object sender, PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            g.Clear(Theme.Bg);
+
+            Rectangle rect = new Rectangle(1, 1, 40, 40);
+            Image avatar = null;
+            if (_currentVideo != null && (!string.IsNullOrEmpty(_currentVideo.ChannelId) || !string.IsNullOrEmpty(_currentVideo.CustomThumbUrl)))
+            {
+                string key = "ch_" + (!string.IsNullOrEmpty(_currentVideo.ChannelId) ? _currentVideo.ChannelId : _currentVideo.Artist);
+                avatar = ThumbnailCache.GetOrRequestThumbnail(key, _currentVideo.CustomThumbUrl, () =>
+                {
+                    SafeInvoke(() => _picWatchChannelAvatar.Invalidate());
+                });
+            }
+
+            if (avatar != null)
+            {
+                using (var gp = new GraphicsPath())
+                {
+                    gp.AddEllipse(rect);
+                    Region oldClip = g.Clip;
+                    g.SetClip(gp);
+                    g.DrawImage(avatar, rect);
+                    g.Clip = oldClip;
+                }
+                using (var pen = new Pen(Theme.Border, 1.5f))
+                {
+                    g.DrawEllipse(pen, rect);
+                }
+            }
+            else
+            {
+                string name = _currentVideo != null ? _currentVideo.Artist : "Y";
+                string initial = !string.IsNullOrEmpty(name) ? name.Trim().Substring(0, 1).ToUpper() : "Y";
+                int hash = Math.Abs((name ?? "").GetHashCode());
+                Color[] colors = new Color[]
+                {
+                    Color.FromArgb(235, 45, 85),
+                    Color.FromArgb(16, 163, 127),
+                    Color.FromArgb(52, 130, 245),
+                    Color.FromArgb(145, 71, 255),
+                    Color.FromArgb(255, 130, 0)
+                };
+                Color c1 = colors[hash % colors.Length];
+                Color c2 = Theme.Blend(c1, Color.Black, 0.35f);
+
+                using (var lg = new LinearGradientBrush(rect, c1, c2, 45f))
+                {
+                    g.FillEllipse(lg, rect);
+                }
+                using (var pen = new Pen(Color.FromArgb(80, 255, 255, 255), 1.2f))
+                {
+                    g.DrawEllipse(pen, rect);
+                }
+                using (var f = new Font("Segoe UI Semibold", 13f, FontStyle.Bold))
+                {
+                    TextRenderer.DrawText(g, initial, f, rect, Color.White,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                }
+            }
+        }
+
+        private void EnsureVlcPlayer()
+        {
+            if (_vlcPlayer == null && _vlcCanvas != null && _vlcCanvas.IsHandleCreated)
+            {
+                _vlcPlayer = new VlcPlayer(_vlcCanvas.Handle);
+                _vlcPlayer.OnEndReached += () => SafeInvoke(() =>
+                {
+                    _isPlaying = false;
+                    UpdatePlayPauseButton();
+                    double tot = TotalVideoDurationSeconds;
+                    if (_lblVidTimeCombined != null && tot > 0)
+                    {
+                        _lblVidTimeCombined.Text = YouTubeService.FormatSeconds(tot) + " / " + YouTubeService.FormatSeconds(tot);
+                    }
+                    if (_customSeekBar != null) _customSeekBar.Invalidate();
+                    EmitStatus("🎬 Fim do vídeo.");
+                });
+            }
+        }
+
+        private void CenterLoadingOverlay()
+        {
+            if (_loadingOverlay != null && _videoCanvasContainer != null)
+            {
+                _loadingOverlay.Left = Math.Max(10, (_videoCanvasContainer.Width - _loadingOverlay.Width) / 2);
+                _loadingOverlay.Top = Math.Max(10, (_videoCanvasContainer.Height - _loadingOverlay.Height) / 2);
+            }
+        }
+
+        private void WireEvents()
+        {
+            // Sidebar Navigation (Início | Inscrições | Você | Histórico)
+            _navHome.Click += async (s, e) => await SwitchToNavSectionAsync("home");
+            _navSubscriptions.Click += async (s, e) => await SwitchToNavSectionAsync("subs");
+            _navYou.Click += async (s, e) => await SwitchToNavSectionAsync("you");
+            _navHistory.Click += async (s, e) => await SwitchToNavSectionAsync("history");
+            _navBackToPlayer.Click += (s, e) => ShowWatchView();
+            _navOpenUrl.Click += (s, e) => PromptOpenVideoUrl();
+
+            // Search Filter Chips ("all", "videos", "channels", "hide_shorts", "sponsor_block")
+            _chipFilterAll.Click += (s, e) => ApplySearchChipFilter("all");
+            _chipFilterVideos.Click += (s, e) => ApplySearchChipFilter("videos");
+            _chipFilterChannels.Click += (s, e) => ApplySearchChipFilter("channels");
+            _chipHideShorts.Click += (s, e) => ToggleHideShorts();
+            _chipToggleSponsorBlock.Click += (s, e) => ToggleSponsorBlock();
+
+            // YouTube Channel Header Controls (Início | Vídeos | Playlists)
+            _btnBackFromChannel.Click += (s, e) => ExitChannelViewToSearch();
+            _btnChannelTabHome.Click += async (s, e) => await LoadChannelTabAsync("home");
+            _btnChannelTabVideos.Click += async (s, e) => await LoadChannelTabAsync("videos");
+            _btnChannelTabPlaylists.Click += async (s, e) => await LoadChannelTabAsync("playlists");
+            _btnImportOpenedPlaylist.Click += (s, e) => ImportOpenedChannelPlaylistToLibrary();
+
+            // Catalog Grid & Related Cards Events
+            _catalogGridCards.ItemActivated += (idx, item) => HandleCardActivated(item);
+            _catalogGridCards.ChannelClicked += item => OpenChannelFromItem(item);
+            _catalogGridCards.FavoriteClicked += (idx, vid) => ToggleSaveVideo(vid);
+            _catalogGridCards.LoadMoreRequested += async () => await LoadMoreVideosAsync();
+
+            _relatedRowCards.ItemActivated += (idx, item) => HandleCardActivated(item);
+            _relatedRowCards.ChannelClicked += item => OpenChannelFromItem(item);
+            _relatedRowCards.FavoriteClicked += (idx, vid) => ToggleSaveVideo(vid);
+            _relatedRowCards.LoadMoreRequested += async () => await LoadMoreVideosAsync();
+
+            // Watch Metadata Bar Controls
+            _picWatchChannelAvatar.Click += (s, e) => { if (_currentVideo != null) OpenChannelFromItem(_currentVideo); };
+            _lblVideoChannel.Click += (s, e) => { if (_currentVideo != null) OpenChannelFromItem(_currentVideo); };
+            _lblVideoSubInfo.Click += (s, e) => { if (_currentVideo != null) OpenChannelFromItem(_currentVideo); };
+            _btnOpenCurrentChannel.Click += (s, e) => { if (_currentVideo != null) OpenChannelFromItem(_currentVideo); };
+            _btnSaveVideo.Click += (s, e) => { if (_currentVideo != null) ToggleSaveVideo(_currentVideo); };
+            _btnBackToCatalogFromWatch.Click += (s, e) => ReturnToCatalog();
+
+            // Quality & Theater/Fullscreen Buttons
+            _btnQ360.Click += (s, e) => ChangeVideoQuality(360);
+            _btnQ480.Click += (s, e) => ChangeVideoQuality(480);
+            _btnQ720.Click += (s, e) => ChangeVideoQuality(720);
+            _btnQ1080.Click += (s, e) => ChangeVideoQuality(1080);
+
+            _btnBottomTheater.Click += (s, e) => ToggleTheaterMode(!_isTheaterMode);
+            _btnBottomFullscreen.Click += (s, e) => ToggleFullscreen(!_isFullscreen);
+
+            _btnCancelLoad.Click += (s, e) =>
+            {
+                StopProgressiveSession();
+                _loadingOverlay.Visible = false;
+                _isLoading = false;
+                UpdatePlayPauseButton();
+                EmitStatus("Carregamento do vídeo cancelado.");
+            };
+
+            // Transport Controls
+            _btnVidPlayPause.Click += (s, e) => TogglePlayPause();
+            _btnVidNext.Click += (s, e) => PlayNextVideo();
+            _btnVidBack10.Click += (s, e) => SeekRelative(-10.0);
+            _btnVidFwd10.Click += (s, e) => SeekRelative(10.0);
+            _btnVidStop.Click += (s, e) => StopVideo();
+
+            // Custom Dual Seek/Buffer Bar
+            _customSeekBar.Paint += OnPaintCustomSeekBar;
+            _customSeekBar.MouseEnter += (s, e) => { _isHoveringSeek = true; _customSeekBar.Invalidate(); };
+            _customSeekBar.MouseLeave += (s, e) => { _isHoveringSeek = false; _hoverSeekMouseX = -1; _customSeekBar.Invalidate(); };
+            _customSeekBar.MouseDown += (s, e) =>
+            {
+                _isDraggingSeek = true;
+                double tot = TotalVideoDurationSeconds;
+                if (tot > 0)
+                {
+                    double ratio = Math.Max(0.0, Math.Min(1.0, (double)e.X / Math.Max(1, _customSeekBar.Width)));
+                    _dragScrubSeconds = ratio * tot;
+                    _customSeekBar.Invalidate();
+                }
+            };
+            _customSeekBar.MouseMove += (s, e) =>
+            {
+                _lastMouseActivityUtc = DateTime.UtcNow;
+                _hoverSeekMouseX = e.X;
+                double tot = TotalVideoDurationSeconds;
+                if (_isDraggingSeek)
+                {
+                    if (tot > 0)
+                    {
+                        double ratio = Math.Max(0.0, Math.Min(1.0, (double)e.X / Math.Max(1, _customSeekBar.Width)));
+                        _dragScrubSeconds = ratio * tot;
+                        _lblVidTimeCombined.Text = YouTubeService.FormatSeconds(_dragScrubSeconds) + " / " + YouTubeService.FormatSeconds(tot);
+                    }
+                }
+                _customSeekBar.Invalidate();
+            };
+            _customSeekBar.MouseUp += (s, e) =>
+            {
+                if (_isDraggingSeek)
+                {
+                    _isDraggingSeek = false;
+                    SeekToSeconds(_dragScrubSeconds);
+                }
+            };
+
+            // Independent Video Audio Regulator
+            _btnVidMute.Click += (s, e) => ToggleVideoMute();
+            _btnVidAudioDialog.Click += (s, e) => ShowVideoAudioRegulatorDialog();
+
+            _vidVolCustomBar.Paint += OnPaintVideoVolumeBar;
+            _vidVolCustomBar.MouseEnter += (s, e) => { _isHoveringVolBar = true; _vidVolCustomBar.Invalidate(); };
+            _vidVolCustomBar.MouseLeave += (s, e) => { _isHoveringVolBar = false; _vidVolCustomBar.Invalidate(); };
+            _vidVolCustomBar.MouseDown += (s, e) =>
+            {
+                _isDraggingVolBar = true;
+                SetVideoVolumeFromBarMouse(e.X);
+            };
+            _vidVolCustomBar.MouseMove += (s, e) =>
+            {
+                if (_isDraggingVolBar) SetVideoVolumeFromBarMouse(e.X);
+            };
+            _vidVolCustomBar.MouseUp += (s, e) =>
+            {
+                if (_isDraggingVolBar)
+                {
+                    _isDraggingVolBar = false;
+                    _config.Save();
+                }
+            };
+
+            _videoBottomBar.MouseWheel += OnVideoVolumeMouseWheel;
+            _vidVolCustomBar.MouseWheel += OnVideoVolumeMouseWheel;
+        }
+
+        private void HandleCardActivated(TrackItem item)
+        {
+            if (item == null) return;
+            if (item.IsChannel)
+            {
+                OpenChannelFromItem(item);
+                return;
+            }
+            if (item.IsPlaylistCard)
+            {
+                OpenChannelPlaylistItemsAsync(item);
+                return;
+            }
+            PlayVideo(item);
+        }
+
+        // ====================================================================
+        // SEARCH FILTER CHIPS ("all", "videos", "channels")
+        // ====================================================================
+
+        private void ApplySearchChipFilter(string chip)
+        {
+            _activeSearchChip = chip ?? "all";
+            UpdateChipButtonsUI();
+
+            if (_isChannelView)
+            {
+                ExitChannelViewToSearch();
+                return;
+            }
+
+            RefreshFilteredSearchCatalog(true);
+        }
+
+        private void ToggleHideShorts()
+        {
+            _config.HideShorts = !_config.HideShorts;
+            _config.Save();
+            _chipHideShorts.Text = _config.HideShorts ? "🚫 Shorts: Ocultos" : "▶ Shorts: Visíveis";
+            StyleChip(_chipHideShorts, _config.HideShorts);
+            RefreshCurrentViewShortsFilter();
+            EmitStatus(_config.HideShorts ? "🚫 Filtro de Shorts ativo: Shorts removidos do catálogo" : "▶ Shorts agora visíveis no catálogo");
+        }
+
+        private void ToggleSponsorBlock()
+        {
+            _config.AutoSkipSponsors = !_config.AutoSkipSponsors;
+            _config.Save();
+            _chipToggleSponsorBlock.Text = _config.AutoSkipSponsors ? "🛡️ SponsorBlock: ON" : "🛡️ SponsorBlock: OFF";
+            StyleChip(_chipToggleSponsorBlock, _config.AutoSkipSponsors);
+            EmitStatus(_config.AutoSkipSponsors ? "🛡️ SponsorBlock ativado: Pulo automático de patrocínios ligado" : "🛡️ SponsorBlock desativado");
+        }
+
+        private bool HasValidAuth()
+        {
+            if (!string.IsNullOrEmpty(_config.CookiesFilePath) && File.Exists(_config.CookiesFilePath)) return true;
+            if (!string.IsNullOrEmpty(_config.BrowserForCookies) && _config.BrowserForCookies != "none") return true;
+            return false;
+        }
+
+        private string GetAccountStatusLabel()
+        {
+            if (!string.IsNullOrEmpty(_config.CookiesFilePath) && File.Exists(_config.CookiesFilePath))
+            {
+                return "● Autenticado (Autônomo)";
+            }
+            if (!string.IsNullOrEmpty(_config.BrowserForCookies) && _config.BrowserForCookies != "none")
+            {
+                return "● YouTube (" + _config.BrowserForCookies.ToUpper() + ")";
+            }
+            return "🔑 Conectar Conta Google";
+        }
+
+        public void RefreshSidebarAccountStatus()
+        {
+            if (_lblSidebarAccount != null)
+            {
+                _lblSidebarAccount.Text = GetAccountStatusLabel();
+                _lblSidebarAccount.ForeColor = HasValidAuth() ? Color.FromArgb(0, 212, 130) : Theme.TextDim;
+            }
+        }
+
+        public void ShowGoogleAuthDialog()
+        {
+            using (var dlg = new GoogleAuthDialog(_config))
+            {
+                dlg.AuthChanged += () =>
+                {
+                    _lblSidebarAccount.Text = GetAccountStatusLabel();
+                    _lblSidebarAccount.ForeColor = HasValidAuth() ? Color.FromArgb(0, 212, 130) : Theme.TextDim;
+                    _homeVideos.Clear();
+                    _subscriptionsVideos.Clear();
+                    _historyVideos.Clear();
+                    if (_activeNavSection == "home" || _activeNavSection == "subs" || _activeNavSection == "history")
+                    {
+                        var _ = SwitchToNavSectionAsync(_activeNavSection, true);
+                    }
+                    EmitStatus("Conta Google atualizada! Feeds recarregados.");
+                };
+                dlg.ShowDialog(this);
+            }
+        }
+
+        private List<TrackItem> FilterItemsForDisplay(List<TrackItem> rawItems)
+        {
+            if (rawItems == null) return new List<TrackItem>();
+            if (!_config.HideShorts) return rawItems;
+
+            var filtered = new List<TrackItem>(rawItems.Count);
+            for (int i = 0; i < rawItems.Count; i++)
+            {
+                var item = rawItems[i];
+                if (item != null && !item.IsShort)
+                {
+                    filtered.Add(item);
+                }
+            }
+            return filtered;
+        }
+
+        private void RefreshCurrentViewShortsFilter()
+        {
+            if (_isChannelView)
+            {
+                _catalogGridCards.SetItems(FilterItemsForDisplay(_channelCurrentItems), false);
+            }
+            else if (_activeNavSection == "search")
+            {
+                RefreshFilteredSearchCatalog(false);
+            }
+            else if (_activeNavSection == "home")
+            {
+                _catalogGridCards.SetItems(FilterItemsForDisplay(_homeVideos), false);
+            }
+            else if (_activeNavSection == "subs")
+            {
+                _catalogGridCards.SetItems(FilterItemsForDisplay(_subscriptionsVideos), false);
+            }
+            else if (_activeNavSection == "history")
+            {
+                _catalogGridCards.SetItems(FilterItemsForDisplay(_historyVideos), false);
+            }
+            else if (_activeNavSection == "you")
+            {
+                _catalogGridCards.SetItems(FilterItemsForDisplay(_config.SavedVideos), false);
+            }
+        }
+
+        private void UpdateChipButtonsUI()
+        {
+            bool showChips = !_isChannelView;
+            _topChipsBar.Visible = showChips;
+            if (showChips)
+            {
+                bool isSearch = (_activeNavSection == "search");
+                _chipFilterAll.Visible = isSearch;
+                _chipFilterVideos.Visible = isSearch;
+                _chipFilterChannels.Visible = isSearch;
+
+                if (isSearch)
+                {
+                    StyleChip(_chipFilterAll, _activeSearchChip == "all");
+                    StyleChip(_chipFilterVideos, _activeSearchChip == "videos");
+                    StyleChip(_chipFilterChannels, _activeSearchChip == "channels");
+                    _chipHideShorts.Location = new Point(244, 6);
+                    _chipToggleSponsorBlock.Location = new Point(384, 6);
+                }
+                else
+                {
+                    _chipHideShorts.Location = new Point(14, 6);
+                    _chipToggleSponsorBlock.Location = new Point(154, 6);
+                }
+
+                _chipHideShorts.Text = _config.HideShorts ? "🚫 Shorts: Ocultos" : "▶ Shorts: Visíveis";
+                StyleChip(_chipHideShorts, _config.HideShorts);
+
+                _chipToggleSponsorBlock.Text = _config.AutoSkipSponsors ? "🛡️ SponsorBlock: ON" : "🛡️ SponsorBlock: OFF";
+                StyleChip(_chipToggleSponsorBlock, _config.AutoSkipSponsors);
+            }
+        }
+
+        private void StyleChip(Button btn, bool active)
+        {
+            if (btn == null) return;
+            btn.BackColor = active ? TextPrimary : BgCard;
+            btn.ForeColor = active ? BgDark : TextPrimary;
+        }
+
+        private List<TrackItem> GetFilteredSearchItems()
+        {
+            if (_searchVideos == null) return new List<TrackItem>();
+            if (_activeSearchChip == "videos")
+            {
+                var vids = _searchVideos.FindAll(x => !x.IsChannel && !x.IsPlaylistCard);
+                return _config.HideShorts ? vids.FindAll(x => !x.IsShort) : vids;
+            }
+            if (_activeSearchChip == "channels")
+            {
+                var channels = _searchVideos.FindAll(x => x.IsChannel);
+                // If YouTube returned videos from channels that didn't have a separate channelRenderer card,
+                // synthesize distinct channel cards from the video results so the "Canais" tab always shows them cleanly!
+                var seenChannelKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var c in channels)
+                {
+                    if (!string.IsNullOrEmpty(c.ChannelId)) seenChannelKeys.Add(c.ChannelId);
+                    if (!string.IsNullOrEmpty(c.Title)) seenChannelKeys.Add(c.Title);
+                }
+
+                foreach (var v in _searchVideos)
+                {
+                    if (v.IsChannel || v.IsPlaylistCard) continue;
+                    string chName = (v.Artist ?? "").Trim();
+                    string chId = (v.ChannelId ?? "").Trim();
+                    if (string.IsNullOrEmpty(chName) || chName == "YouTube") continue;
+
+                    string key = !string.IsNullOrEmpty(chId) ? chId : chName;
+                    if (seenChannelKeys.Contains(key) || seenChannelKeys.Contains(chName)) continue;
+                    seenChannelKeys.Add(key);
+                    seenChannelKeys.Add(chName);
+
+                    channels.Add(new TrackItem
+                    {
+                        Id = !string.IsNullOrEmpty(chId) ? chId : ("channel:" + chName),
+                        Title = chName,
+                        Artist = "Canal Oficial • Clique para ver Início, Vídeos e Playlists",
+                        Duration = "CANAL",
+                        ItemType = "channel",
+                        ChannelId = chId,
+                        SubscriberCountText = "Canal encontrado nos vídeos da busca"
+                    });
+                }
+                return channels;
+            }
+            return _config.HideShorts ? _searchVideos.FindAll(x => !x.IsShort) : _searchVideos;
+        }
+
+        private void RefreshFilteredSearchCatalog(bool resetScroll)
+        {
+            var filtered = GetFilteredSearchItems();
+            bool hasMore = !string.IsNullOrEmpty(_searchContinuationToken) && _activeSearchChip != "channels";
+            _catalogGridCards.HasMoreItems = hasMore;
+            _catalogGridCards.SetItems(filtered, resetScroll);
+
+            if (string.IsNullOrEmpty(_searchQueryLabel))
+            {
+                _lblCatalogHeader.Text = "Pesquise vídeos ou canais na barra superior";
+            }
+            else if (_activeSearchChip == "channels")
+            {
+                _lblCatalogHeader.Text = string.Format("📺 Canais encontrados para \"{0}\" ({1} canais — clique em um canal para ver Início, Vídeos e Playlists exclusivos dele)",
+                    _searchQueryLabel, filtered.Count);
+            }
+            else if (_activeSearchChip == "videos")
+            {
+                _lblCatalogHeader.Text = string.Format("🎬 Vídeos encontrados para \"{0}\" ({1} vídeos)",
+                    _searchQueryLabel, filtered.Count);
+            }
+            else
+            {
+                _lblCatalogHeader.Text = string.Format("Resultados para \"{0}\" ({1} itens — use os filtros Tudo | Vídeos | Canais no topo)",
+                    _searchQueryLabel, filtered.Count);
+            }
+        }
+
+        // ====================================================================
+        // OFFICIAL YOUTUBE CHANNEL PAGE (INÍCIO | VÍDEOS | PLAYLISTS)
+        // ====================================================================
+
+        public async void OpenChannelFromItem(TrackItem item)
+        {
+            if (item == null) return;
+            if (_isFullscreen) ToggleFullscreen(false);
+
+            string chId = item.ChannelId;
+            string chName = item.IsChannel ? item.Title : item.Artist;
+            if (string.IsNullOrWhiteSpace(chName)) chName = "Canal do YouTube";
+
+            _isChannelView = true;
+            _isSavedVideosView = false;
+            _activeChannelId = chId ?? "";
+            _activeChannelName = chName;
+            _activeChannelAvatarUrl = item.CustomThumbUrl ?? "";
+            _activeChannelSubscribers = item.SubscriberCountText ?? "";
+            _openedChannelPlaylist = null;
+
+            _homeVideos.Clear();
+            _subscriptionsVideos.Clear();
+            _historyVideos.Clear();
+            _searchVideos.Clear();
+            _openedPlaylistVideos.Clear();
+            if (!_watchPagePanel.Visible) _relatedRowCards.SetItems(new List<TrackItem>());
+            ThumbnailCache.ClearMemoryCache();
+            MemoryOptimizer.TrimMemory();
+            ThumbnailCache.IsVisibleCheck = (id) => _catalogGridCards.IsItemVisible(id);
+
+            UpdateChipButtonsUI();
+            _watchPagePanel.Visible = false;
+            _catalogPanel.Visible = true;
+            _catalogPanel.BringToFront();
+
+            // Start on "home" (Início) tab just like YouTube!
+            await LoadChannelTabAsync("home");
+        }
+
+        private void UpdateChannelTabIndicator(string tab)
+        {
+            _btnChannelTabHome.ForeColor = (tab == "home") ? TextPrimary : TextSecondary;
+            _btnChannelTabVideos.ForeColor = (tab == "videos") ? TextPrimary : TextSecondary;
+            _btnChannelTabPlaylists.ForeColor = (tab == "playlists" || tab == "playlist_items") ? TextPrimary : TextSecondary;
+
+            Button activeBtn = _btnChannelTabHome;
+            if (tab == "videos") activeBtn = _btnChannelTabVideos;
+            else if (tab == "playlists" || tab == "playlist_items") activeBtn = _btnChannelTabPlaylists;
+
+            _tabUnderlineIndicator.Left = activeBtn.Left;
+            _tabUnderlineIndicator.Width = activeBtn.Width;
+        }
+
+        private async Task LoadChannelTabAsync(string tab)
+        {
+            _activeChannelTab = tab;
+            _openedChannelPlaylist = null;
+            _btnImportOpenedPlaylist.Visible = false;
+
+            _channelBannerPanel.Visible = true;
+            UpdateChannelTabIndicator(tab);
+
+            _lblChannelBannerTitle.Text = _activeChannelName;
+            string tabPt = tab == "home" ? "Início (Destaques)" : (tab == "videos" ? "Vídeos Enviados" : "Playlists Criadas");
+            _lblChannelBannerSub.Text = "Carregando " + tabPt + " exclusivamente deste canal...";
+            _picChannelAvatar.Invalidate();
+
+            EmitStatus(string.Format("📺 Carregando aba '{0}' do canal '{1}'...", tabPt, _activeChannelName));
+
+            ChannelPageData pageData = await _ytService.FetchChannelPageAsync(_activeChannelId, _activeChannelName, tab);
+
+            if (!string.IsNullOrEmpty(pageData.ChannelId))
+                _activeChannelId = pageData.ChannelId;
+            if (!string.IsNullOrEmpty(pageData.ChannelName))
+                _activeChannelName = pageData.ChannelName;
+            if (!string.IsNullOrEmpty(pageData.AvatarUrl))
+                _activeChannelAvatarUrl = pageData.AvatarUrl;
+            if (!string.IsNullOrEmpty(pageData.SubscriberText))
+                _activeChannelSubscribers = pageData.SubscriberText;
+
+            _channelContinuationToken = pageData.ContinuationToken ?? "";
+            _channelCurrentItems = pageData.Items ?? new List<TrackItem>();
+
+            _lblChannelBannerTitle.Text = _activeChannelName;
+            _lblChannelBannerSub.Text = !string.IsNullOrEmpty(_activeChannelSubscribers)
+                ? string.Format("{0}  •  Conteúdo 100% oficial de {1}", _activeChannelSubscribers, _activeChannelName)
+                : string.Format("Canal Oficial do YouTube  •  Conteúdo exclusivo de {0}", _activeChannelName);
+            _picChannelAvatar.Invalidate();
+
+            if (tab == "home")
+            {
+                _lblCatalogHeader.Text = string.Format("🏠 Início — Envios recentes e destaques exclusivos de {0} ({1} vídeos)",
+                    _activeChannelName, _channelCurrentItems.Count);
+            }
+            else if (tab == "videos")
+            {
+                _lblCatalogHeader.Text = string.Format("🎬 Todos os vídeos enviados por {0} ({1} carregados — role para baixo para carregar mais)",
+                    _activeChannelName, _channelCurrentItems.Count);
+            }
+            else
+            {
+                _lblCatalogHeader.Text = string.Format("📂 Playlists oficiais de {0} ({1} encontradas — clique em uma playlist para ver os vídeos)",
+                    _activeChannelName, _channelCurrentItems.Count);
+            }
+
+            bool hasMore = !string.IsNullOrEmpty(_channelContinuationToken);
+            _catalogGridCards.HasMoreItems = hasMore;
+            _catalogGridCards.SetItems(_channelCurrentItems, true);
+
+            if (tab != "playlists" && _watchPagePanel.Visible)
+            {
+                _relatedRowCards.HasMoreItems = hasMore;
+                _relatedRowCards.SetItems(_channelCurrentItems, true);
+            }
+        }
+
+        private async void OpenChannelPlaylistItemsAsync(TrackItem playlistCard)
+        {
+            if (playlistCard == null || string.IsNullOrEmpty(playlistCard.PlaylistId)) return;
+
+            _activeChannelTab = "playlist_items";
+            _openedChannelPlaylist = playlistCard;
+            _channelContinuationToken = "";
+            UpdateChannelTabIndicator("playlists");
+
+            _lblCatalogHeader.Text = "⏳ Carregando vídeos da playlist \"" + playlistCard.Title + "\"...";
+            EmitStatus("📂 Abrindo playlist: " + playlistCard.Title);
+
+            var res = await _ytService.FetchUrlOrPlaylistAsync(playlistCard.PlaylistId, _config, false);
+            _openedPlaylistVideos = res.Item1 ?? new List<TrackItem>();
+
+            for (int i = 0; i < _openedPlaylistVideos.Count; i++)
+            {
+                if (string.IsNullOrEmpty(_openedPlaylistVideos[i].ChannelId))
+                    _openedPlaylistVideos[i].ChannelId = _activeChannelId;
+            }
+
+            _btnImportOpenedPlaylist.Visible = _openedPlaylistVideos.Count > 0;
+            _btnImportOpenedPlaylist.Text = string.Format("📥 Salvar Playlist ({0})", _openedPlaylistVideos.Count);
+
+            _lblCatalogHeader.Text = string.Format("📂 Playlist de {0}: \"{1}\" ({2} vídeos)",
+                _activeChannelName, playlistCard.Title, _openedPlaylistVideos.Count);
+
+            _catalogGridCards.HasMoreItems = false;
+            _catalogGridCards.SetItems(_openedPlaylistVideos, true);
+            if (_watchPagePanel.Visible)
+            {
+                _relatedRowCards.HasMoreItems = false;
+                _relatedRowCards.SetItems(_openedPlaylistVideos, true);
+            }
+
+            EmitStatus(string.Format("📂 Playlist '{0}' carregada com {1} vídeos.", playlistCard.Title, _openedPlaylistVideos.Count));
+        }
+
+        private void ImportOpenedChannelPlaylistToLibrary()
+        {
+            if (_openedChannelPlaylist == null || _openedPlaylistVideos == null || _openedPlaylistVideos.Count == 0)
+                return;
+
+            var newPl = new UserPlaylist
+            {
+                Name = _openedChannelPlaylist.Title,
+                RemoteUrl = "https://www.youtube.com/playlist?list=" + _openedChannelPlaylist.PlaylistId,
+                Tracks = new List<TrackItem>(_openedPlaylistVideos)
+            };
+
+            _config.Playlists.Add(newPl);
+            _config.Save();
+
+            if (PlaylistImportedToLibrary != null)
+            {
+                PlaylistImportedToLibrary();
+            }
+
+            EmitStatus(string.Format("✅ Playlist '{0}' ({1} faixas) salva na sua biblioteca!", newPl.Name, newPl.Tracks.Count));
+            MessageBox.Show(
+                this,
+                string.Format("A playlist \"{0}\" ({1} itens) foi salva com sucesso nas suas Playlists do LiteTube!",
+                    newPl.Name, newPl.Tracks.Count),
+                "Playlist Salva",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information
+            );
+        }
+
+        private void ExitChannelViewToSearch()
+        {
+            _isChannelView = false;
+            _channelBannerPanel.Visible = false;
+            _btnImportOpenedPlaylist.Visible = false;
+            _watchPagePanel.Visible = false;
+            _catalogPanel.Visible = true;
+            _catalogPanel.BringToFront();
+            UpdateChipButtonsUI();
+            RefreshFilteredSearchCatalog(false);
+        }
+
+        // ====================================================================
+        // INFINITE SCROLL (SEARCH & CHANNEL UPLOADS)
+        // ====================================================================
+
+        private async Task LoadMoreVideosAsync()
+        {
+            if (_isLoadingMore || _isSavedVideosView) return;
+
+            // 1. Channel View Infinite Scroll
+            if (_isChannelView)
+            {
+                if (string.IsNullOrEmpty(_channelContinuationToken))
+                {
+                    _catalogGridCards.HasMoreItems = false;
+                    _relatedRowCards.HasMoreItems = false;
+                    return;
+                }
+
+                _isLoadingMore = true;
+                _catalogGridCards.IsLoadingMore = true;
+                _relatedRowCards.IsLoadingMore = true;
+                EmitStatus("⏳ Carregando mais vídeos do canal...");
+
+                try
+                {
+                    var nextBatch = await _ytService.FetchChannelContinuationAsync(_channelContinuationToken, _activeChannelId, _activeChannelName);
+                    _channelContinuationToken = nextBatch.ContinuationToken ?? "";
+                    bool hasNext = !string.IsNullOrEmpty(nextBatch.ContinuationToken);
+                    _catalogGridCards.HasMoreItems = hasNext;
+                    _relatedRowCards.HasMoreItems = hasNext;
+
+                    if (nextBatch.Items != null && nextBatch.Items.Count > 0)
+                    {
+                        _channelCurrentItems.AddRange(nextBatch.Items);
+                        int addedGrid = _catalogGridCards.AppendItems(nextBatch.Items);
+                        if (_watchPagePanel.Visible) _relatedRowCards.AppendItems(nextBatch.Items);
+                        _lblCatalogHeader.Text = string.Format("🎬 Vídeos enviados por {0} ({1} vídeos carregados)",
+                            _activeChannelName, _channelCurrentItems.Count);
+                        EmitStatus(string.Format("➕ Mais {0} vídeos de {1} carregados!", addedGrid, _activeChannelName));
+                    }
+                }
+                catch { }
+                finally
+                {
+                    _isLoadingMore = false;
+                    _catalogGridCards.IsLoadingMore = false;
+                    _relatedRowCards.IsLoadingMore = false;
+                }
+                return;
+            }
+
+            // 2. Search Results Infinite Scroll
+            if (_activeNavSection == "search" || !string.IsNullOrEmpty(_searchContinuationToken))
+            {
+                if (string.IsNullOrEmpty(_searchContinuationToken))
+                {
+                    _catalogGridCards.HasMoreItems = false;
+                    _relatedRowCards.HasMoreItems = false;
+                    return;
+                }
+
+                _isLoadingMore = true;
+                _catalogGridCards.IsLoadingMore = true;
+                _relatedRowCards.IsLoadingMore = true;
+                EmitStatus("⏳ Carregando mais resultados...");
+
+                try
+                {
+                    var nextBatch = await _ytService.FetchSearchContinuationAsync(_searchContinuationToken, true);
+                    _searchContinuationToken = nextBatch.ContinuationToken ?? "";
+                    bool hasNext = !string.IsNullOrEmpty(nextBatch.ContinuationToken);
+                    _catalogGridCards.HasMoreItems = hasNext;
+                    _relatedRowCards.HasMoreItems = hasNext;
+
+                    if (nextBatch.Items != null && nextBatch.Items.Count > 0)
+                    {
+                        _searchVideos.AddRange(nextBatch.Items);
+                        if (_searchVideos.Count > 350)
+                        {
+                            _searchVideos.RemoveRange(0, _searchVideos.Count - 350);
+                        }
+
+                        var itemsToAppend = nextBatch.Items;
+                        if (_activeSearchChip == "videos")
+                            itemsToAppend = nextBatch.Items.FindAll(x => !x.IsChannel && !x.IsPlaylistCard);
+                        else if (_activeSearchChip == "channels")
+                            itemsToAppend = nextBatch.Items.FindAll(x => x.IsChannel);
+
+                        int addedGrid = _catalogGridCards.AppendItems(itemsToAppend);
+                        if (_watchPagePanel.Visible) _relatedRowCards.AppendItems(nextBatch.Items.FindAll(x => !x.IsChannel));
+                        EmitStatus(string.Format("➕ Mais {0} resultados carregados!", addedGrid));
+                    }
+                }
+                catch { }
+                finally
+                {
+                    _isLoadingMore = false;
+                    _catalogGridCards.IsLoadingMore = false;
+                    _relatedRowCards.IsLoadingMore = false;
+                }
+                return;
+            }
+
+            // 3. Home / Subscriptions / History Feeds Infinite Scroll
+            string feedUrl = null;
+            List<TrackItem> targetList = null;
+            string sectionLabel = "";
+
+            if (_activeNavSection == "home")
+            {
+                feedUrl = "https://www.youtube.com/";
+                targetList = _homeVideos;
+                sectionLabel = "recomendados";
+            }
+            else if (_activeNavSection == "subs")
+            {
+                feedUrl = "https://www.youtube.com/feed/subscriptions";
+                targetList = _subscriptionsVideos;
+                sectionLabel = "inscrições";
+            }
+            else if (_activeNavSection == "history")
+            {
+                feedUrl = "https://www.youtube.com/feed/history";
+                targetList = _historyVideos;
+                sectionLabel = "histórico";
+            }
+
+            if (!string.IsNullOrEmpty(feedUrl) && targetList != null)
+            {
+                _isLoadingMore = true;
+                _catalogGridCards.IsLoadingMore = true;
+                _relatedRowCards.IsLoadingMore = true;
+                EmitStatus(string.Format("⏳ Carregando mais vídeos de {0}...", sectionLabel));
+
+                try
+                {
+                    int startIndex = targetList.Count + 1;
+                    var res = await _ytService.FetchUrlOrPlaylistAsync(feedUrl, _config, true, startIndex, 50);
+
+                    if (res.Item1 != null && res.Item1.Count > 0)
+                    {
+                        targetList.AddRange(res.Item1);
+                        var filtered = FilterItemsForDisplay(res.Item1);
+                        int addedGrid = _catalogGridCards.AppendItems(filtered);
+                        if (_watchPagePanel.Visible) _relatedRowCards.AppendItems(filtered);
+                        _catalogGridCards.HasMoreItems = (res.Item1.Count >= 15);
+                        if (_watchPagePanel.Visible) _relatedRowCards.HasMoreItems = (res.Item1.Count >= 15);
+                        EmitStatus(string.Format("➕ Mais {0} vídeos adicionados ao feed ({1} no total)!", addedGrid, targetList.Count));
+                    }
+                    else
+                    {
+                        _catalogGridCards.HasMoreItems = false;
+                        _relatedRowCards.HasMoreItems = false;
+                        EmitStatus("Fim dos vídeos disponíveis para este feed.");
+                    }
+                }
+                catch { }
+                finally
+                {
+                    _isLoadingMore = false;
+                    _catalogGridCards.IsLoadingMore = false;
+                    _relatedRowCards.IsLoadingMore = false;
+                }
+            }
+        }
+
+        private Button CreateYouTubeSidebarButton(string text, ref int y)
+        {
+            var btn = new ModernButton
+            {
+                Text = text,
+                Location = new Point(8, y),
+                Size = new Size(189, 40),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.Transparent,
+                ForeColor = TextSecondary,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Font = new Font("Segoe UI Semibold", 9.5f),
+                CornerRadius = 12,
+                ShowActiveIndicator = true,
+                ActiveAccentColor = YouTubeRed,
+                ActiveColor = Theme.SurfaceHigh,
+                Cursor = Cursors.Hand
+            };
+            _sidebar.Controls.Add(btn);
+            y += 44;
+            return btn;
+        }
+
+        private void UpdateSidebarSelection()
+        {
+            StyleSidebarNavButton(_navHome, _activeNavSection == "home");
+            StyleSidebarNavButton(_navSubscriptions, _activeNavSection == "subs");
+            StyleSidebarNavButton(_navYou, _activeNavSection == "you");
+            StyleSidebarNavButton(_navHistory, _activeNavSection == "history");
+
+            if (_navBackToPlayer != null)
+            {
+                _navBackToPlayer.Visible = (_currentVideo != null);
+                StyleSidebarNavButton(_navBackToPlayer, _watchPagePanel != null && _watchPagePanel.Visible);
+            }
+        }
+
+        private void StyleSidebarNavButton(Button btn, bool active)
+        {
+            var mb = btn as ModernButton;
+            if (mb != null)
+            {
+                mb.IsActive = active;
+                mb.ForeColor = active ? TextPrimary : TextSecondary;
+                mb.Font = new Font("Segoe UI Semibold", 9.5f, active ? FontStyle.Bold : FontStyle.Regular);
+                mb.Invalidate();
+            }
+        }
+
+        public async Task SwitchToNavSectionAsync(string section, bool forceRefresh = false)
+        {
+            if (_isFullscreen) ToggleFullscreen(false);
+
+            if (_watchPagePanel != null && _watchPagePanel.Visible)
+            {
+                StopVideo();
+                if (_relatedRowCards != null) _relatedRowCards.ClearItems(false);
+            }
+
+            _activeNavSection = section ?? "home";
+            _isChannelView = false;
+            _isSavedVideosView = false;
+            _channelBannerPanel.Visible = false;
+
+            _catalogPanel.Visible = true;
+            _watchPagePanel.Visible = false;
+            _catalogPanel.BringToFront();
+
+            UpdateSidebarSelection();
+            UpdateChipButtonsUI();
+
+            if (_activeNavSection == "home")
+            {
+                _subscriptionsVideos.Clear();
+                _historyVideos.Clear();
+                _channelCurrentItems.Clear();
+                _searchVideos.Clear();
+                _openedPlaylistVideos.Clear();
+                if (!_watchPagePanel.Visible) _relatedRowCards.SetItems(new List<TrackItem>());
+
+                _lblCatalogHeader.Text = "🏠 Início • Vídeos recomendados para você";
+                if (!forceRefresh && _homeVideos.Count > 0)
+                {
+                    _catalogGridCards.HasMoreItems = (_homeVideos.Count >= 15);
+                    _catalogGridCards.SetItems(FilterItemsForDisplay(_homeVideos), false);
+                    return;
+                }
+
+                ThumbnailCache.ClearMemoryCache();
+                MemoryOptimizer.TrimMemory();
+
+                string bName = GetAccountStatusLabel();
+
+                _lblCatalogHeader.Text = string.Format("⏳ Carregando seus vídeos recomendados do YouTube ({0})...", bName);
+                _catalogGridCards.IsLoadingMore = true;
+                EmitStatus("Sincronizando página inicial / recomendados...");
+
+                var res = await _ytService.FetchUrlOrPlaylistAsync("https://www.youtube.com/", _config, true, 1, 60);
+                _catalogGridCards.IsLoadingMore = false;
+
+                if (res.Item1 != null && res.Item1.Count > 0)
+                {
+                    _homeVideos = res.Item1;
+                    _lblCatalogHeader.Text = string.Format("🏠 Início • {0} vídeos recomendados para você ({1})",
+                        _homeVideos.Count, bName);
+                    _catalogGridCards.HasMoreItems = (_homeVideos.Count >= 15);
+                    _catalogGridCards.SetItems(FilterItemsForDisplay(_homeVideos), true);
+                    EmitStatus(string.Format("🏠 {0} vídeos recomendados carregados!", _homeVideos.Count));
+                }
+                else
+                {
+                    _lblCatalogHeader.Text = "⚠️ Não foi possível carregar os recomendados. " + (res.Item2 ?? "");
+                    EmitStatus(res.Item2 ?? "Erro ao carregar recomendados.");
+                    if (res.Item2 != null && res.Item2.Contains("bloqueia os cookies"))
+                    {
+                        MessageBox.Show(this, res.Item2, "Conta YouTube", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                }
+            }
+            else if (_activeNavSection == "subs")
+            {
+                _homeVideos.Clear();
+                _historyVideos.Clear();
+                _channelCurrentItems.Clear();
+                _searchVideos.Clear();
+                _openedPlaylistVideos.Clear();
+                if (!_watchPagePanel.Visible) _relatedRowCards.SetItems(new List<TrackItem>());
+
+                _lblCatalogHeader.Text = "🔔 Inscrições • Envios mais recentes dos seus canais";
+                if (!forceRefresh && _subscriptionsVideos.Count > 0)
+                {
+                    _catalogGridCards.HasMoreItems = (_subscriptionsVideos.Count >= 15);
+                    _catalogGridCards.SetItems(FilterItemsForDisplay(_subscriptionsVideos), false);
+                    return;
+                }
+
+                ThumbnailCache.ClearMemoryCache();
+                MemoryOptimizer.TrimMemory();
+
+                string bName = GetAccountStatusLabel();
+
+                _lblCatalogHeader.Text = string.Format("⏳ Carregando inscrições da sua conta ({0})...", bName);
+                _catalogGridCards.IsLoadingMore = true;
+                EmitStatus("Sincronizando feed de inscrições do YouTube...");
+
+                var res = await _ytService.FetchUrlOrPlaylistAsync("https://www.youtube.com/feed/subscriptions", _config, true, 1, 60);
+                _catalogGridCards.IsLoadingMore = false;
+
+                if (res.Item1 != null && res.Item1.Count > 0)
+                {
+                    _subscriptionsVideos = res.Item1;
+                    _lblCatalogHeader.Text = string.Format("🔔 Inscrições • {0} vídeos recentes dos seus canais ({1})",
+                        _subscriptionsVideos.Count, bName);
+                    _catalogGridCards.HasMoreItems = (_subscriptionsVideos.Count >= 15);
+                    _catalogGridCards.SetItems(FilterItemsForDisplay(_subscriptionsVideos), true);
+                    EmitStatus(string.Format("🔔 {0} vídeos de canais inscritos carregados!", _subscriptionsVideos.Count));
+                }
+                else
+                {
+                    _lblCatalogHeader.Text = "⚠️ Nenhuma inscrição encontrada. " + (res.Item2 ?? "");
+                    EmitStatus(res.Item2 ?? "Erro ao carregar inscrições.");
+                }
+            }
+            else if (_activeNavSection == "you")
+            {
+                _isSavedVideosView = true;
+                _homeVideos.Clear();
+                _subscriptionsVideos.Clear();
+                _historyVideos.Clear();
+                _channelCurrentItems.Clear();
+                _searchVideos.Clear();
+                _openedPlaylistVideos.Clear();
+                if (!_watchPagePanel.Visible) _relatedRowCards.SetItems(new List<TrackItem>());
+
+                _lblCatalogHeader.Text = string.Format("👤 Você • Seus Vídeos Salvos ({0} vídeos)", _config.SavedVideos.Count);
+                _catalogGridCards.HasMoreItems = false;
+                _catalogGridCards.SetItems(FilterItemsForDisplay(_config.SavedVideos), false);
+            }
+            else if (_activeNavSection == "history")
+            {
+                _homeVideos.Clear();
+                _subscriptionsVideos.Clear();
+                _channelCurrentItems.Clear();
+                _searchVideos.Clear();
+                _openedPlaylistVideos.Clear();
+                if (!_watchPagePanel.Visible) _relatedRowCards.SetItems(new List<TrackItem>());
+
+                _lblCatalogHeader.Text = "🕒 Histórico • Vídeos assistidos recentemente";
+                if (!forceRefresh && _historyVideos.Count > 0)
+                {
+                    _catalogGridCards.HasMoreItems = (_historyVideos.Count >= 15);
+                    _catalogGridCards.SetItems(FilterItemsForDisplay(_historyVideos), false);
+                    return;
+                }
+
+                ThumbnailCache.ClearMemoryCache();
+                MemoryOptimizer.TrimMemory();
+
+                string bName = GetAccountStatusLabel();
+
+                _lblCatalogHeader.Text = string.Format("⏳ Carregando histórico da sua conta ({0})...", bName);
+                _catalogGridCards.IsLoadingMore = true;
+                EmitStatus("Sincronizando histórico do YouTube...");
+
+                var res = await _ytService.FetchUrlOrPlaylistAsync("https://www.youtube.com/feed/history", _config, true, 1, 60);
+                _catalogGridCards.IsLoadingMore = false;
+
+                if (res.Item1 != null && res.Item1.Count > 0)
+                {
+                    _historyVideos = res.Item1;
+                    _lblCatalogHeader.Text = string.Format("🕒 Histórico • {0} vídeos recentes ({1})",
+                        _historyVideos.Count, bName);
+                    _catalogGridCards.HasMoreItems = (_historyVideos.Count >= 15);
+                    _catalogGridCards.SetItems(FilterItemsForDisplay(_historyVideos), true);
+                    EmitStatus(string.Format("🕒 {0} vídeos do histórico carregados!", _historyVideos.Count));
+                }
+                else
+                {
+                    _lblCatalogHeader.Text = "⚠️ Nenhum vídeo no histórico encontrado. " + (res.Item2 ?? "");
+                    EmitStatus(res.Item2 ?? "Erro ao carregar histórico.");
+                }
+            }
+        }
+
+        public async Task RefreshCurrentPageAsync()
+        {
+            if (_watchPagePanel != null && _watchPagePanel.Visible)
+            {
+                if (_currentVideo != null)
+                {
+                    EmitStatus(string.Format("🔄 Recarregando vídeos relacionados para '{0}'...", _currentVideo.Title));
+                    ThumbnailCache.ClearMemoryCache();
+                    MemoryOptimizer.TrimMemory();
+                    var related = await _ytService.FetchRelatedVideosAsync(_currentVideo.Id, _config, 35);
+                    if (related != null && related.Count > 0)
+                    {
+                        var filtered = FilterItemsForDisplay(related.FindAll(x => x.Id != _currentVideo.Id));
+                        _relatedRowCards.ScrollToTop();
+                        _relatedRowCards.SetItems(filtered, true);
+                        _relatedRowCards.PlayingVideoId = _currentVideo.Id;
+                        ThumbnailCache.IsVisibleCheck = (id) => _relatedRowCards.IsItemVisible(id);
+                        _relatedRowCards.PruneOffscreenResources();
+                        EmitStatus(string.Format("🔄 {0} próximos vídeos recarregados (F5)!", filtered.Count));
+                    }
+                    else
+                    {
+                        EmitStatus("🔄 Página do vídeo atualizada (F5)!");
+                    }
+                }
+                return;
+            }
+
+            if (_isChannelView && !string.IsNullOrEmpty(_activeChannelId))
+            {
+                EmitStatus(string.Format("🔄 Recarregando canal {0}...", _activeChannelName));
+                _channelCurrentItems.Clear();
+                _channelContinuationToken = "";
+                _catalogGridCards.ScrollToTop();
+                _catalogGridCards.SetItems(new List<TrackItem>(), true);
+                ThumbnailCache.ClearMemoryCache();
+                MemoryOptimizer.TrimMemory();
+                await LoadChannelTabAsync(_activeChannelTab ?? "videos");
+                EmitStatus(string.Format("🔄 Canal {0} recarregado (F5)!", _activeChannelName));
+                return;
+            }
+
+            if (_activeNavSection == "search" && !string.IsNullOrWhiteSpace(_searchQueryLabel))
+            {
+                EmitStatus("🔄 Recarregando busca...");
+                _searchVideos.Clear();
+                _searchContinuationToken = "";
+                _catalogGridCards.ScrollToTop();
+                _catalogGridCards.SetItems(new List<TrackItem>(), true);
+                ThumbnailCache.ClearMemoryCache();
+                MemoryOptimizer.TrimMemory();
+                var searchPage = await _ytService.SearchPageAsync(_searchQueryLabel, "all", _config);
+                SetSearchResults(searchPage, _searchQueryLabel);
+                EmitStatus("🔄 Busca recarregada (F5)!");
+                return;
+            }
+
+            if (_activeNavSection == "home" || _activeNavSection == "subs" || _activeNavSection == "history")
+            {
+                // Limpa os vídeos da aba ativa (inclusive os que foram acumulados no scroll infinito)
+                if (_activeNavSection == "home") _homeVideos.Clear();
+                else if (_activeNavSection == "subs") _subscriptionsVideos.Clear();
+                else if (_activeNavSection == "history") _historyVideos.Clear();
+
+                // Volta para o topo e limpa os cards do grid imediatamente
+                _catalogGridCards.ScrollToTop();
+                _catalogGridCards.SetItems(new List<TrackItem>(), true);
+
+                ThumbnailCache.ClearMemoryCache();
+                MemoryOptimizer.TrimMemory();
+
+                await SwitchToNavSectionAsync(_activeNavSection, forceRefresh: true);
+                EmitStatus("🔄 Página recarregada (F5)!");
+                return;
+            }
+
+            if (_activeNavSection == "you")
+            {
+                _catalogGridCards.ScrollToTop();
+                ThumbnailCache.ClearMemoryCache();
+                MemoryOptimizer.TrimMemory();
+                _catalogGridCards.SetItems(FilterItemsForDisplay(_config.SavedVideos), true);
+                EmitStatus("🔄 Vídeos Salvos recarregados (F5)!");
+                return;
+            }
+        }
+
+        public void ExitWatchPage()
+        {
+            ReturnToCatalog();
+        }
+
+        private void ReturnToCatalog()
+        {
+            // 1. Para o player VLC e finaliza streaming
+            StopVideo();
+
+            // 2. Limpa completamente os cards de recomendação e miniaturas da barra lateral
+            if (_relatedRowCards != null)
+            {
+                _relatedRowCards.ClearItems(false);
+            }
+
+            // 3. Libera os metadados do vídeo anterior
+            _currentVideo = null;
+            if (_lblVideoTitle != null) _lblVideoTitle.Text = "";
+            if (_lblVideoChannel != null) _lblVideoChannel.Text = "";
+            if (_lblVideoSubInfo != null) _lblVideoSubInfo.Text = "";
+            if (_picWatchChannelAvatar != null && _picWatchChannelAvatar.Image != null)
+            {
+                _picWatchChannelAvatar.Image.Dispose();
+                _picWatchChannelAvatar.Image = null;
+            }
+            _currentSponsorSegments = new List<SponsorSegment>();
+            _lastSkippedSponsorUuid = null;
+
+            // 4. Alterna visibilidade para o catálogo
+            _watchPagePanel.Visible = false;
+            _catalogPanel.Visible = true;
+            _catalogPanel.BringToFront();
+            _sidebar.Visible = true;
+            UpdateSidebarSelection();
+            UpdateChipButtonsUI();
+
+            // 5. Restaura instantaneamente o catálogo inicial com o scroll preservado
+            if (_catalogGridCards != null)
+            {
+                _catalogGridCards.ResumeAndAttach();
+                ThumbnailCache.IsVisibleCheck = (id) => _catalogGridCards.IsItemVisible(id);
+                _catalogGridCards.PruneOffscreenResources();
+            }
+
+            // 6. Limpeza e trim de memória
+            ThumbnailCache.ClearMemoryCache();
+            MemoryOptimizer.TrimMemory();
+            GC.Collect(2, GCCollectionMode.Optimized);
+        }
+
+        private void ShowWatchView()
+        {
+            // Suspende e descarrega a grade do catálogo inicial para liberar RAM e texturas GPU
+            if (_catalogGridCards != null && !_catalogGridCards.IsSuspended)
+            {
+                _catalogGridCards.SuspendAndDetach();
+            }
+
+            _catalogPanel.Visible = false;
+            _watchPagePanel.Visible = true;
+            _watchPagePanel.BringToFront();
+
+            _topChipsBar.Visible = false;
+            _sidebar.Visible = !_isFullscreen && !_isTheaterMode;
+            UpdateSidebarSelection();
+
+            ThumbnailCache.ClearMemoryCache();
+            ThumbnailCache.IsVisibleCheck = (id) => _relatedRowCards.IsItemVisible(id);
+            _relatedRowCards.PruneOffscreenResources();
+
+            MemoryOptimizer.TrimMemory();
+        }
+
+        public void SuspendForBackground()
+        {
+            PauseIfPlaying();
+
+            if (_catalogGridCards != null && !_catalogGridCards.IsSuspended)
+            {
+                _catalogGridCards.SuspendAndDetach();
+            }
+            if (_relatedRowCards != null && !_relatedRowCards.IsSuspended)
+            {
+                _relatedRowCards.SuspendAndDetach();
+            }
+
+            ThumbnailCache.ClearMemoryCache();
+            MemoryOptimizer.TrimMemory();
+            GC.Collect(2, GCCollectionMode.Optimized);
+        }
+
+        public void ResumeFromBackground()
+        {
+            if (_watchPagePanel != null && _watchPagePanel.Visible)
+            {
+                if (_relatedRowCards != null && _relatedRowCards.IsSuspended)
+                {
+                    _relatedRowCards.ResumeAndAttach();
+                }
+                ThumbnailCache.IsVisibleCheck = (id) => _relatedRowCards.IsItemVisible(id);
+                _relatedRowCards.PruneOffscreenResources();
+            }
+            else
+            {
+                if (_catalogGridCards != null && _catalogGridCards.IsSuspended)
+                {
+                    _catalogGridCards.ResumeAndAttach();
+                }
+                ThumbnailCache.IsVisibleCheck = (id) => _catalogGridCards.IsItemVisible(id);
+                _catalogGridCards.PruneOffscreenResources();
+            }
+
+            UpdateVideoAudioUI();
+        }
+
+        public void ActivateThumbnailVisibilityCheck()
+        {
+            if (_watchPagePanel != null && _watchPagePanel.Visible)
+            {
+                ThumbnailCache.IsVisibleCheck = (id) => _relatedRowCards.IsItemVisible(id);
+                _relatedRowCards.PruneOffscreenResources();
+            }
+            else
+            {
+                ThumbnailCache.IsVisibleCheck = (id) => _catalogGridCards.IsItemVisible(id);
+                _catalogGridCards.PruneOffscreenResources();
+            }
+        }
+
+        public void SetSearchResults(SearchResultPage page, string queryLabel)
+        {
+            if (_isFullscreen) ToggleFullscreen(false);
+
+            _activeNavSection = "search";
+            _isChannelView = false;
+            _isSavedVideosView = false;
+            _channelBannerPanel.Visible = false;
+            _activeSearchChip = "all";
+
+            _catalogPanel.Visible = true;
+            _watchPagePanel.Visible = false;
+            _catalogPanel.BringToFront();
+
+            _homeVideos.Clear();
+            _subscriptionsVideos.Clear();
+            _historyVideos.Clear();
+            _channelCurrentItems.Clear();
+            _openedPlaylistVideos.Clear();
+            if (!_watchPagePanel.Visible) _relatedRowCards.SetItems(new List<TrackItem>());
+            ThumbnailCache.ClearMemoryCache();
+            MemoryOptimizer.TrimMemory();
+            ThumbnailCache.IsVisibleCheck = (id) => _catalogGridCards.IsItemVisible(id);
+
+            _searchQueryLabel = queryLabel ?? "";
+            _searchVideos = (page != null && page.Items != null) ? page.Items : new List<TrackItem>();
+            _searchContinuationToken = (page != null) ? (page.ContinuationToken ?? "") : "";
+
+            UpdateSidebarSelection();
+            UpdateChipButtonsUI();
+            RefreshFilteredSearchCatalog(true);
+
+            EmitStatus(string.Format("🎬 {0} resultados encontrados para '{1}'.", _searchVideos.Count, _searchQueryLabel));
+        }
+
+        public void SetSearchResults(List<TrackItem> videos, string queryLabel)
+        {
+            var page = new SearchResultPage { Items = videos ?? new List<TrackItem>(), Query = queryLabel ?? "" };
+            SetSearchResults(page, queryLabel);
+        }
+
+        private void ToggleSaveVideo(TrackItem video)
+        {
+            if (video == null || video.IsChannel || video.IsPlaylistCard) return;
+            bool saved = _config.ToggleSavedVideo(video);
+            UpdateSavedVideosCount();
+            UpdateSaveVideoButton();
+            _catalogGridCards.Invalidate();
+            _relatedRowCards.Invalidate();
+            EmitStatus((saved ? "📌 Vídeo salvo: " : "Removido dos salvos: ") + video.Title);
+        }
+
+        private void UpdateSavedVideosCount()
+        {
+            if (_navYou != null)
+            {
+                _navYou.Text = string.Format("👤   Você ({0})", _config.SavedVideos.Count);
+            }
+        }
+
+        private void UpdateSaveVideoButton()
+        {
+            bool isSaved = _currentVideo != null && _config.IsSavedVideo(_currentVideo.Id);
+            _btnSaveVideo.Text = isSaved ? "\u2713 Salvo" : "Salvar";
+            var mb = _btnSaveVideo as ModernButton;
+            if (mb != null)
+            {
+                mb.BackColor = isSaved ? Theme.Blue : Theme.SurfaceHigh;
+                mb.ForeColor = isSaved ? Color.White : TextPrimary;
+                mb.BorderColor = isSaved ? Color.Empty : Theme.Border;
+                mb.Invalidate();
+            }
+        }
+
+        public async void PlayVideo(TrackItem video)
+        {
+            if (video == null || string.IsNullOrEmpty(video.Id)) return;
+            Logger.Info("WATCH", string.Format("PlayVideo chamado: Id={0}, Title='{1}', Dur={2:0.0}s, Res={3}p",
+                video.Id, video.Title, video.DurationSeconds, _config.VideoQualityHeight));
+
+            if (video.IsChannel)
+            {
+                OpenChannelFromItem(video);
+                return;
+            }
+            if (video.IsPlaylistCard)
+            {
+                OpenChannelPlaylistItemsAsync(video);
+                return;
+            }
+
+            ShowWatchView();
+            StopProgressiveSession();
+
+            ThumbnailCache.EnforceDiskLimitMB(_config.MaxThumbCacheSizeMB);
+
+            if (_config.AutoPauseMusicWhenVideoPlays && _musicEngine != null && _musicEngine.IsPlaying)
+            {
+                _musicEngine.PauseIfPlaying();
+            }
+
+            _currentVideo = video;
+            _currentSponsorSegments = new List<SponsorSegment>();
+            _lastSkippedSponsorUuid = null;
+            _customSeekBar.Invalidate();
+            _catalogGridCards.PlayingVideoId = video.Id;
+            _relatedRowCards.PlayingVideoId = video.Id;
+
+            // Load YouTube Related / Recommended Videos in Watch Sidebar
+            bool isExistingPlaylistTrack = (_openedPlaylistVideos != null && _openedPlaylistVideos.Count > 0 &&
+                                            _openedPlaylistVideos.Exists(x => x.Id == video.Id));
+            if (!isExistingPlaylistTrack)
+            {
+                _relatedRowCards.SetItems(new List<TrackItem>(), true);
+                LoadRelatedVideosForPlayingVideoAsync(video.Id);
+            }
+
+            EnsureVlcPlayer();
+            if (_vlcPlayer != null)
+            {
+                _vlcPlayer.Stop();
+            }
+
+            _isPlaying = false;
+            _isLoading = true;
+            UpdatePlayPauseButton();
+            UpdateSaveVideoButton();
+
+            _lblVideoTitle.Text = video.Title;
+            _lblVideoChannel.Text = !string.IsNullOrEmpty(video.Artist) ? video.Artist : "Canal do YouTube";
+            _lblVideoSubInfo.Text = string.Format("Qualidade {0}p  •  Áudio Vídeo: {1}%",
+                _config.VideoQualityHeight, (int)Math.Round(VideoProfile.Volume * 100));
+            _picWatchChannelAvatar.Invalidate();
+
+            CenterLoadingOverlay();
+            _lblLoadingTitle.Text = video.Title;
+            _lblLoadingProgress.Text = "Conectando ao YouTube (Modo LibVLC Direct3D)...";
+            _loadingOverlay.Visible = true;
+            _loadingOverlay.BringToFront();
+
+            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            string binDir = Path.Combine(baseDir, "bin");
+
+            var session = new ProgressiveVideoSession(video, _config.VideoQualityHeight, binDir, _config.BrowserForCookies, _config.CookiesFilePath);
+            _activeProgressiveSession = session;
+
+            using (var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(30)))
+            {
+                var streamUrls = await session.ResolveStreamUrlsAsync(cts.Token);
+                if (_activeProgressiveSession != session) return;
+
+                _loadingOverlay.Visible = false;
+                _isLoading = false;
+
+                if (streamUrls == null || string.IsNullOrEmpty(streamUrls[0]))
+                {
+                    UpdatePlayPauseButton();
+                    string errMsg = !string.IsNullOrEmpty(session.LastResolveError)
+                        ? session.LastResolveError
+                        : "Não foi possível obter os fluxos de streaming deste vídeo.";
+                    _lblBufferBadge.Text = "❌ " + errMsg;
+                    _lblLoadingProgress.Text = "❌ " + errMsg;
+                    EmitStatus("❌ " + errMsg);
+                    return;
+                }
+
+                string vUrl = streamUrls[0];
+                string aUrl = streamUrls.Length > 1 ? streamUrls[1] : null;
+                string codec = streamUrls.Length > 2 ? streamUrls[2] : "Direct";
+
+                EnsureVlcPlayer();
+                _vlcPlayer.PlayStream(vUrl, aUrl, video.DurationSeconds, 0.0);
+                ApplyVideoAudioSettings();
+
+                _isPlaying = true;
+                UpdatePlayPauseButton();
+                _lblBufferBadge.Text = string.Format("▶ LibVLC Direct3D ({0})", codec);
+                _lblVideoSubInfo.Text = string.Format("Qualidade {0}p ({1})  •  Motor LibVLC Direct3D  •  Áudio Vídeo: {2}%",
+                    _config.VideoQualityHeight, codec, (int)Math.Round(VideoProfile.Volume * 100));
+                EmitStatus(string.Format("▶ Assistindo ({0}p • LibVLC): {1}", _config.VideoQualityHeight, video.Title));
+
+                if (_config.EnableSponsorBlock)
+                {
+                    var _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            var segs = await SponsorBlockService.GetSegmentsAsync(video.Id);
+                            SafeInvoke(() =>
+                            {
+                                if (_currentVideo != null && _currentVideo.Id == video.Id && segs != null)
+                                {
+                                    _currentSponsorSegments = segs;
+                                    _customSeekBar.Invalidate();
+                                    if (_currentSponsorSegments.Count > 0)
+                                    {
+                                        _lblBufferBadge.Text = string.Format("🛡️ {0} trecho(s) mapeados (SponsorBlock)", _currentSponsorSegments.Count);
+                                        Logger.Info("SPONSORBLOCK", string.Format("SponsorBlock: {0} trechos carregados para {1}", _currentSponsorSegments.Count, video.Title));
+                                    }
+                                }
+                            });
+                        }
+                        catch { }
+                    });
+                }
+            }
+        }
+
+        private void StopProgressiveSession()
+        {
+            if (_activeProgressiveSession != null)
+            {
+                _activeProgressiveSession.Dispose();
+                _activeProgressiveSession = null;
+            }
+        }
+
+        private void LoadRelatedVideosForPlayingVideoAsync(string videoId)
+        {
+            if (string.IsNullOrWhiteSpace(videoId)) return;
+            string targetId = videoId;
+
+            Task.Run(async () =>
+            {
+                try
+                {
+                    var related = await _ytService.FetchRelatedVideosAsync(targetId, _config, 35);
+                    SafeInvoke(() =>
+                    {
+                        if (_currentVideo != null && _currentVideo.Id == targetId && _watchPagePanel != null && _watchPagePanel.Visible)
+                        {
+                            var filtered = FilterItemsForDisplay(related);
+                            _relatedRowCards.ScrollToTop();
+                            _relatedRowCards.SetItems(filtered, true);
+                            _relatedRowCards.PlayingVideoId = targetId;
+                            ThumbnailCache.IsVisibleCheck = (id) => _relatedRowCards.IsItemVisible(id);
+                            _relatedRowCards.PruneOffscreenResources();
+                        }
+                    });
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn("WATCH", "Falha ao carregar próximos vídeos: " + ex.Message);
+                }
+            });
+        }
+
+        // ====================================================================
+        // THEATER MODE, FULLSCREEN MODE & KEYBOARD SHORTCUTS
+        // ====================================================================
+
+        public void ToggleTheaterMode(bool enableTheater)
+        {
+            if (_isFullscreen && enableTheater)
+            {
+                ToggleFullscreen(false);
+            }
+
+            _isTheaterMode = enableTheater;
+            _rightRelatedPanel.Visible = !_isTheaterMode && !_isFullscreen;
+            _sidebar.Visible = !_isTheaterMode && !_isFullscreen;
+
+            _btnBottomTheater.Text = _isTheaterMode ? "\u25A3" : "\u25AD";
+            _btnBottomTheater.BackColor = Color.Transparent;
+
+            EmitStatus(_isTheaterMode
+                ? "🎬 Modo Teatro ativado (barra lateral oculta). Pressione 'T' para restaurar."
+                : "🎬 Modo Padrão restaurado.");
+        }
+
+        public void ToggleFullscreen(bool enableFullscreen)
+        {
+            if (_isFullscreen == enableFullscreen) return;
+            _isFullscreen = enableFullscreen;
+            _lastMouseActivityUtc = DateTime.UtcNow;
+
+            if (_isFullscreen)
+            {
+                if (!_watchPagePanel.Visible)
+                {
+                    ShowWatchView();
+                }
+
+                _prevWindowState = _parentForm.WindowState;
+                _prevBorderStyle = _parentForm.FormBorderStyle;
+
+                _sidebar.Visible = false;
+                _rightRelatedPanel.Visible = false;
+                _watchMetaPanel.Visible = false;
+                _playerStagePanel.Padding = Padding.Empty;
+                _videoBottomBar.Visible = true;
+
+                _btnBottomFullscreen.Text = "\u2922";
+                _btnBottomFullscreen.BackColor = Color.Transparent;
+
+                if (_parentForm.WindowState == FormWindowState.Maximized)
+                {
+                    _parentForm.WindowState = FormWindowState.Normal;
+                }
+                _parentForm.FormBorderStyle = FormBorderStyle.None;
+                _parentForm.WindowState = FormWindowState.Maximized;
+            }
+            else
+            {
+                _parentForm.FormBorderStyle = _prevBorderStyle == FormBorderStyle.None ? FormBorderStyle.Sizable : _prevBorderStyle;
+                _parentForm.WindowState = _prevWindowState == FormWindowState.Minimized ? FormWindowState.Normal : _prevWindowState;
+
+                _playerStagePanel.Padding = new Padding(14, 6, 8, 8);
+                _watchMetaPanel.Visible = true;
+                _videoBottomBar.Visible = true;
+                _sidebar.Visible = !_isTheaterMode;
+                _rightRelatedPanel.Visible = !_isTheaterMode;
+
+                _btnBottomFullscreen.Text = "\u26F6";
+                _btnBottomFullscreen.BackColor = Color.Transparent;
+            }
+
+            if (FullscreenChanged != null) FullscreenChanged(_isFullscreen);
+        }
+
+        public bool HandleShortcutKey(Keys keyCode)
+        {
+            if (keyCode == Keys.F5)
+            {
+                var _ = RefreshCurrentPageAsync();
+                return true;
+            }
+            if (keyCode == Keys.Escape)
+            {
+                if (_isFullscreen)
+                {
+                    ToggleFullscreen(false);
+                    return true;
+                }
+                if (_isTheaterMode)
+                {
+                    ToggleTheaterMode(false);
+                    return true;
+                }
+            }
+            else if (keyCode == Keys.F11 || keyCode == Keys.F)
+            {
+                if (_watchPagePanel.Visible)
+                {
+                    ToggleFullscreen(!_isFullscreen);
+                    return true;
+                }
+            }
+            else if (keyCode == Keys.T)
+            {
+                if (_watchPagePanel.Visible)
+                {
+                    ToggleTheaterMode(!_isTheaterMode);
+                    return true;
+                }
+            }
+            else if (keyCode == Keys.Space || keyCode == Keys.K || keyCode == Keys.MediaPlayPause)
+            {
+                if (_watchPagePanel.Visible && _currentVideo != null)
+                {
+                    TogglePlayPause();
+                    return true;
+                }
+            }
+            else if (keyCode == Keys.Up || keyCode == Keys.VolumeUp)
+            {
+                if (_watchPagePanel.Visible)
+                {
+                    ChangeVideoVolumeBy(0.05);
+                    return true;
+                }
+            }
+            else if (keyCode == Keys.Down || keyCode == Keys.VolumeDown)
+            {
+                if (_watchPagePanel.Visible)
+                {
+                    ChangeVideoVolumeBy(-0.05);
+                    return true;
+                }
+            }
+            else if (keyCode == Keys.M || keyCode == Keys.VolumeMute)
+            {
+                if (_watchPagePanel.Visible)
+                {
+                    ToggleVideoMute();
+                    return true;
+                }
+            }
+            else if (keyCode == Keys.Left)
+            {
+                if (_watchPagePanel.Visible && _currentVideo != null)
+                {
+                    SeekRelative(-5.0);
+                    return true;
+                }
+            }
+            else if (keyCode == Keys.Right)
+            {
+                if (_watchPagePanel.Visible && _currentVideo != null)
+                {
+                    SeekRelative(5.0);
+                    return true;
+                }
+            }
+            else if (keyCode == Keys.J)
+            {
+                if (_watchPagePanel.Visible && _currentVideo != null)
+                {
+                    SeekRelative(-10.0);
+                    return true;
+                }
+            }
+            else if (keyCode == Keys.L)
+            {
+                if (_watchPagePanel.Visible && _currentVideo != null)
+                {
+                    SeekRelative(10.0);
+                    return true;
+                }
+            }
+            else if (keyCode == Keys.D0 || keyCode == Keys.NumPad0 || keyCode == Keys.Home)
+            {
+                if (_watchPagePanel.Visible && _currentVideo != null) { SeekToPercentage(0.0); return true; }
+            }
+            else if (keyCode == Keys.D1 || keyCode == Keys.NumPad1)
+            {
+                if (_watchPagePanel.Visible && _currentVideo != null) { SeekToPercentage(0.10); return true; }
+            }
+            else if (keyCode == Keys.D2 || keyCode == Keys.NumPad2)
+            {
+                if (_watchPagePanel.Visible && _currentVideo != null) { SeekToPercentage(0.20); return true; }
+            }
+            else if (keyCode == Keys.D3 || keyCode == Keys.NumPad3)
+            {
+                if (_watchPagePanel.Visible && _currentVideo != null) { SeekToPercentage(0.30); return true; }
+            }
+            else if (keyCode == Keys.D4 || keyCode == Keys.NumPad4)
+            {
+                if (_watchPagePanel.Visible && _currentVideo != null) { SeekToPercentage(0.40); return true; }
+            }
+            else if (keyCode == Keys.D5 || keyCode == Keys.NumPad5)
+            {
+                if (_watchPagePanel.Visible && _currentVideo != null) { SeekToPercentage(0.50); return true; }
+            }
+            else if (keyCode == Keys.D6 || keyCode == Keys.NumPad6)
+            {
+                if (_watchPagePanel.Visible && _currentVideo != null) { SeekToPercentage(0.60); return true; }
+            }
+            else if (keyCode == Keys.D7 || keyCode == Keys.NumPad7)
+            {
+                if (_watchPagePanel.Visible && _currentVideo != null) { SeekToPercentage(0.70); return true; }
+            }
+            else if (keyCode == Keys.D8 || keyCode == Keys.NumPad8)
+            {
+                if (_watchPagePanel.Visible && _currentVideo != null) { SeekToPercentage(0.80); return true; }
+            }
+            else if (keyCode == Keys.D9 || keyCode == Keys.NumPad9)
+            {
+                if (_watchPagePanel.Visible && _currentVideo != null) { SeekToPercentage(0.90); return true; }
+            }
+            else if (keyCode == Keys.End)
+            {
+                if (_watchPagePanel.Visible && _currentVideo != null) { SeekToPercentage(0.99); return true; }
+            }
+            else if (keyCode == Keys.MediaStop)
+            {
+                if (_watchPagePanel.Visible)
+                {
+                    StopVideo();
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        public void SeekToPercentage(double fraction)
+        {
+            double tot = TotalVideoDurationSeconds;
+            if (tot > 0)
+            {
+                double target = tot * Math.Max(0.0, Math.Min(0.99, fraction));
+                SeekToSeconds(target);
+                EmitStatus(string.Format("⏩ Pular para {0}% ({1})", (int)Math.Round(fraction * 100), YouTubeService.FormatSeconds(target)));
+            }
+        }
+
+        public void TogglePlayPause()
+        {
+            if (_isLoading) return;
+            if (_currentVideo == null) return;
+
+            try
+            {
+                EnsureVlcPlayer();
+                if (_vlcPlayer != null && _vlcPlayer.HasEnded)
+                {
+                    if (_config.AutoPauseMusicWhenVideoPlays && _musicEngine != null && _musicEngine.IsPlaying)
+                    {
+                        _musicEngine.PauseIfPlaying();
+                    }
+                    ApplyVideoAudioSettings();
+                    _vlcPlayer.Play();
+                    _isPlaying = true;
+                    _lastMouseActivityUtc = DateTime.UtcNow;
+                    UpdatePlayPauseButton();
+                    _customSeekBar.Invalidate();
+                    EmitStatus("▶ Reiniciando: " + _currentVideo.Title);
+                    return;
+                }
+
+                if (_isPlaying)
+                {
+                    if (_vlcPlayer != null) _vlcPlayer.Pause();
+                    _isPlaying = false;
+                    _videoBottomBar.Visible = true;
+                    EmitStatus("⏸ Vídeo pausado: " + _currentVideo.Title);
+                }
+                else
+                {
+                    if (_config.AutoPauseMusicWhenVideoPlays && _musicEngine != null && _musicEngine.IsPlaying)
+                    {
+                        _musicEngine.PauseIfPlaying();
+                    }
+                    ApplyVideoAudioSettings();
+                    if (_vlcPlayer != null) _vlcPlayer.Play();
+                    _isPlaying = true;
+                    _lastMouseActivityUtc = DateTime.UtcNow;
+                    EmitStatus("▶ Assistindo: " + _currentVideo.Title);
+                }
+                UpdatePlayPauseButton();
+            }
+            catch { }
+        }
+
+        public void StopVideo()
+        {
+            StopProgressiveSession();
+            try
+            {
+                if (_vlcPlayer != null) _vlcPlayer.Stop();
+            }
+            catch { }
+            _isPlaying = false;
+            _isLoading = false;
+            _loadingOverlay.Visible = false;
+            _videoBottomBar.Visible = true;
+            UpdatePlayPauseButton();
+        }
+
+        public void PauseIfPlaying()
+        {
+            if (_isPlaying)
+            {
+                try
+                {
+                    if (_vlcPlayer != null) _vlcPlayer.Pause();
+                    _isPlaying = false;
+                    UpdatePlayPauseButton();
+                }
+                catch { }
+            }
+        }
+
+        private void ChangeVideoQuality(int newHeight)
+        {
+            if (_config.VideoQualityHeight == newHeight) return;
+            _config.VideoQualityHeight = newHeight;
+            _config.Save();
+            UpdateQualityButtons();
+
+            if (_currentVideo != null)
+            {
+                PlayVideo(_currentVideo);
+            }
+        }
+
+        private void UpdateQualityButtons()
+        {
+            int q = _config.VideoQualityHeight;
+            StyleQualityBtn(_btnQ360, q == 360);
+            StyleQualityBtn(_btnQ480, q == 480);
+            StyleQualityBtn(_btnQ720, q == 720);
+            StyleQualityBtn(_btnQ1080, q == 1080);
+        }
+
+        private void StyleQualityBtn(Button btn, bool active)
+        {
+            var mb = btn as ModernButton;
+            if (mb != null)
+            {
+                mb.BackColor = active ? Color.FromArgb(240, 240, 240) : Color.Transparent;
+                mb.ForeColor = active ? Color.FromArgb(15, 15, 15) : Color.FromArgb(170, 170, 170);
+                mb.BorderColor = Color.Empty;
+                mb.CornerRadius = 14;
+                mb.Invalidate();
+            }
+        }
+
+        public double CurrentVideoPositionSeconds
+        {
+            get
+            {
+                if (_isDraggingSeek) return _dragScrubSeconds;
+                if (_vlcPlayer != null) return _vlcPlayer.CurrentTimeSeconds;
+                return 0.0;
+            }
+        }
+
+        public double BufferedVideoDurationSeconds
+        {
+            get
+            {
+                if (_activeProgressiveSession != null)
+                {
+                    double frac = _activeProgressiveSession.BufferedFraction;
+                    if (frac > 0 && TotalVideoDurationSeconds > 0)
+                        return frac * TotalVideoDurationSeconds;
+                }
+                return Math.Min(TotalVideoDurationSeconds, CurrentVideoPositionSeconds + 20.0);
+            }
+        }
+
+        public double TotalVideoDurationSeconds
+        {
+            get
+            {
+                if (_vlcPlayer != null && _vlcPlayer.DurationSeconds > 0)
+                    return _vlcPlayer.DurationSeconds;
+                if (_currentVideo != null && _currentVideo.DurationSeconds > 0)
+                    return _currentVideo.DurationSeconds;
+                return 0.0;
+            }
+        }
+
+        public void SeekToSeconds(double seconds)
+        {
+            try
+            {
+                double tot = TotalVideoDurationSeconds;
+                if (tot > 0)
+                {
+                    seconds = Math.Max(0.0, Math.Min(tot - 0.5, seconds));
+                }
+
+                Logger.Info("SEEK", string.Format("LibVLC SeekToSeconds solicitado: {0:0.0}s", seconds));
+                EnsureVlcPlayer();
+                if (_vlcPlayer != null)
+                {
+                    bool wasEnded = _vlcPlayer.HasEnded;
+                    _vlcPlayer.Seek(seconds);
+                    if (wasEnded)
+                    {
+                        _isPlaying = true;
+                        UpdatePlayPauseButton();
+                        EmitStatus(string.Format("▶ Retomando ({0}): {1}", YouTubeService.FormatSeconds(seconds), _currentVideo != null ? _currentVideo.Title : ""));
+                    }
+                }
+                if (_lblVidTimeCombined != null && tot > 0)
+                {
+                    _lblVidTimeCombined.Text = YouTubeService.FormatSeconds(seconds) + " / " + YouTubeService.FormatSeconds(tot);
+                }
+                _customSeekBar.Invalidate();
+            }
+            catch (Exception ex)
+            {
+                EmitStatus("Erro no seek LibVLC: " + ex.Message);
+            }
+        }
+
+        public void SeekRelative(double deltaSeconds)
+        {
+            SeekToSeconds(CurrentVideoPositionSeconds + deltaSeconds);
+        }
+
+        private void SeekFromMouseX(int mouseX)
+        {
+            double tot = TotalVideoDurationSeconds;
+            if (tot <= 0) return;
+            double ratio = Math.Max(0.0, Math.Min(1.0, (double)mouseX / Math.Max(1, _customSeekBar.Width)));
+            SeekToSeconds(ratio * tot);
+        }
+
+        private void OnPaintCustomSeekBar(object sender, PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            int w = _customSeekBar.Width;
+            int h = _customSeekBar.Height;
+
+            g.Clear(Color.FromArgb(15, 15, 15));
+
+            bool isHover = _isHoveringSeek || _isDraggingSeek;
+            int trackH = isHover ? 5 : 3;
+            int trackY = (h - trackH) / 2;
+
+            // 1. Unplayed Track (Neutral dark translucent white/gray)
+            using (var trackBrush = new SolidBrush(Color.FromArgb(70, 255, 255, 255)))
+            {
+                g.FillRectangle(trackBrush, 0, trackY, w, trackH);
+            }
+
+            double tot = TotalVideoDurationSeconds;
+            double cur = CurrentVideoPositionSeconds;
+
+            if (_vlcPlayer != null && _vlcPlayer.HasEnded && tot > 0)
+            {
+                cur = tot;
+            }
+
+            if (tot > 0)
+            {
+                // 2. Buffer Portion (Semi-translucent white)
+                double bufSec = Math.Max(cur, BufferedVideoDurationSeconds);
+                double bufRatio = Math.Max(0.0, Math.Min(1.0, bufSec / tot));
+                int bufW = (int)Math.Round(bufRatio * w);
+                if (bufW > 0)
+                {
+                    using (var bufBrush = new SolidBrush(Color.FromArgb(140, 255, 255, 255)))
+                    {
+                        g.FillRectangle(bufBrush, 0, trackY, bufW, trackH);
+                    }
+                }
+
+                // 3. Hover Ghost Track (YouTube light gray highlight up to cursor)
+                if (isHover && !_isDraggingSeek && _hoverSeekMouseX > 0)
+                {
+                    int hoverW = Math.Min(w, _hoverSeekMouseX);
+                    using (var hoverBrush = new SolidBrush(Color.FromArgb(50, 255, 255, 255)))
+                    {
+                        g.FillRectangle(hoverBrush, 0, trackY, hoverW, trackH);
+                    }
+                }
+
+                // 4. SponsorBlock Segments (Vibrant colored bands on the track)
+                if (_config.EnableSponsorBlock && _currentSponsorSegments != null && _currentSponsorSegments.Count > 0)
+                {
+                    for (int i = 0; i < _currentSponsorSegments.Count; i++)
+                    {
+                        var seg = _currentSponsorSegments[i];
+                        if (seg.EndTime <= seg.StartTime || seg.StartTime >= tot) continue;
+                        int sx = (int)Math.Round((seg.StartTime / tot) * w);
+                        int ex = (int)Math.Round((Math.Min(tot, seg.EndTime) / tot) * w);
+                        int segW = Math.Max(3, ex - sx);
+                        using (var segBrush = new SolidBrush(seg.CategoryColor))
+                        {
+                            g.FillRectangle(segBrush, sx, trackY, segW, trackH);
+                        }
+                    }
+                }
+
+                // 5. Playback Position (Authentic YouTube Pure Red #FF0000)
+                double curRatio = Math.Max(0.0, Math.Min(1.0, cur / tot));
+                int curW = (int)Math.Round(curRatio * w);
+                if (curW > 0)
+                {
+                    using (var redBrush = new SolidBrush(YouTubeRed))
+                    {
+                        g.FillRectangle(redBrush, 0, trackY, curW, trackH);
+                    }
+                }
+
+                // 6. Scrubber Knob (Pure YouTube Red circle #FF0000)
+                if (isHover)
+                {
+                    int knobR = 6;
+                    int cx = Math.Max(knobR, Math.Min(w - knobR, curW));
+                    using (var redBrush = new SolidBrush(YouTubeRed))
+                    {
+                        g.FillEllipse(redBrush, cx - knobR, (h / 2) - knobR, knobR * 2 + 1, knobR * 2 + 1);
+                    }
+                }
+            }
+        }
+
+        public void UpdateTimerTick()
+        {
+            if (_currentVideo == null) return;
+
+            double cur = CurrentVideoPositionSeconds;
+            double tot = TotalVideoDurationSeconds;
+
+            if (_vlcPlayer != null && _vlcPlayer.HasEnded && tot > 0)
+            {
+                cur = tot;
+                UpdatePlayPauseButton();
+            }
+
+            _lblVidTimeCombined.Text = YouTubeService.FormatSeconds(cur) + " / " + YouTubeService.FormatSeconds(tot);
+            _customSeekBar.Invalidate();
+
+            // SponsorBlock Automatic Skip
+            if (_config.EnableSponsorBlock && _config.AutoSkipSponsors && _isPlaying && !_isDraggingSeek && _currentSponsorSegments != null && _currentSponsorSegments.Count > 0)
+            {
+                for (int i = 0; i < _currentSponsorSegments.Count; i++)
+                {
+                    var seg = _currentSponsorSegments[i];
+                    if (seg != null && seg.ActionType == "skip" && cur >= seg.StartTime && cur < seg.EndTime - 0.4)
+                    {
+                        if (_lastSkippedSponsorUuid != seg.UUID)
+                        {
+                            _lastSkippedSponsorUuid = seg.UUID;
+                            double targetSec = Math.Min(tot, seg.EndTime + 0.15);
+                            _vlcPlayer.Seek(targetSec);
+                            string msg = string.Format("⏩ [SponsorBlock] {0} pulado ({1:0.0}s -> {2:0.0}s)",
+                                seg.CategoryLabel, seg.StartTime, seg.EndTime);
+                            EmitStatus(msg);
+                            _lblBufferBadge.Text = string.Format("⏩ {0} pulado!", seg.CategoryLabel);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Auto-hide bottom bar in Fullscreen after 3.2s of mouse inactivity
+            if (_isPlaying && _isFullscreen && _videoBottomBar.Visible && !_isDraggingSeek && !_isDraggingVolBar)
+            {
+                Point cursorScreen = Cursor.Position;
+                Point cursorClient = _videoBottomBar.PointToClient(cursorScreen);
+                bool hoveringBottomBar = _videoBottomBar.ClientRectangle.Contains(cursorClient);
+                if (!hoveringBottomBar && (DateTime.UtcNow - _lastMouseActivityUtc).TotalSeconds >= 3.2)
+                {
+                    _videoBottomBar.Visible = false;
+                }
+            }
+        }
+
+        // ====================================================================
+        // INDEPENDENT VIDEO AUDIO PROFILE LOGIC
+        // ====================================================================
+
+        public void ApplyVideoAudioSettings()
+        {
+            try
+            {
+                if (_vlcPlayer != null)
+                {
+                    _vlcPlayer.IsMuted = VideoProfile.IsMuted;
+                    int safeVolume = Math.Max(0, Math.Min(100, (int)Math.Round(VideoProfile.EffectiveVolume * 100.0)));
+                    _vlcPlayer.Volume = safeVolume;
+                    _vlcPlayer.SpeedRatio = (float)Math.Max(0.5, Math.Min(2.0, VideoProfile.PlaybackSpeed));
+                }
+            }
+            catch { }
+            UpdateVideoAudioUI();
+        }
+
+        public void ToggleVideoMute()
+        {
+            VideoProfile.IsMuted = !VideoProfile.IsMuted;
+            ApplyVideoAudioSettings();
+            _config.Save();
+            EmitStatus(VideoProfile.IsMuted
+                ? "🎬 Áudio de Vídeo mutado (🔇)"
+                : string.Format("🎬 Volume de Vídeo: {0}%", (int)Math.Round(VideoProfile.Volume * 100)));
+        }
+
+        public void ChangeVideoVolumeBy(double delta)
+        {
+            double v = Math.Max(0.0, Math.Min(1.0, Math.Round(VideoProfile.Volume + delta, 2)));
+            VideoProfile.Volume = v;
+            if (v > 0.0 && VideoProfile.IsMuted) VideoProfile.IsMuted = false;
+            ApplyVideoAudioSettings();
+            _config.Save();
+            EmitStatus(string.Format("🎬 Volume de Vídeo: {0}% (Independente da Música)", (int)Math.Round(VideoProfile.Volume * 100)));
+        }
+
+        private void OnVideoVolumeMouseWheel(object sender, MouseEventArgs e)
+        {
+            ChangeVideoVolumeBy(e.Delta > 0 ? 0.05 : -0.05);
+        }
+
+        private void SetVideoVolumeFromBarMouse(int mouseX)
+        {
+            int padX = 5;
+            int trackW = Math.Max(10, _vidVolCustomBar.Width - padX * 2);
+            double ratio = Math.Max(0.0, Math.Min(1.0, (double)(mouseX - padX) / trackW));
+            VideoProfile.Volume = Math.Round(ratio, 2);
+            if (VideoProfile.Volume > 0 && VideoProfile.IsMuted) VideoProfile.IsMuted = false;
+            ApplyVideoAudioSettings();
+        }
+
+        private void OnPaintVideoVolumeBar(object sender, PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            int w = _vidVolCustomBar.Width;
+            int h = _vidVolCustomBar.Height;
+
+            g.Clear(Color.FromArgb(15, 15, 15));
+
+            bool isMuted = VideoProfile.IsMuted;
+            double vol = isMuted ? 0.0 : Math.Max(0.0, Math.Min(1.0, VideoProfile.Volume));
+            bool isHover = _isHoveringVolBar || _isDraggingVolBar;
+
+            int trackH = isHover ? 4 : 3;
+            int padX = 5;
+            int trackW = Math.Max(10, w - padX * 2);
+            int trackY = (h - trackH) / 2;
+
+            // 1. Unfilled track (subtle translucent white/gray)
+            using (var bgBrush = new SolidBrush(Color.FromArgb(80, 255, 255, 255)))
+            {
+                g.FillRectangle(bgBrush, padX, trackY, trackW, trackH);
+            }
+
+            // 2. Filled track (pure white)
+            int fillW = (int)Math.Round(vol * trackW);
+            if (fillW > 0)
+            {
+                using (var fillBrush = new SolidBrush(Color.White))
+                {
+                    g.FillRectangle(fillBrush, padX, trackY, fillW, trackH);
+                }
+            }
+
+            // 3. Thumb Knob (pure white circle)
+            int knobR = isHover ? 6 : 5;
+            int cx = padX + fillW;
+            using (var thumbBrush = new SolidBrush(Color.White))
+            {
+                g.FillEllipse(thumbBrush, cx - knobR, (h / 2) - knobR, knobR * 2 + 1, knobR * 2 + 1);
+            }
+        }
+
+        public void UpdateVideoAudioUI()
+        {
+            int pct = (int)Math.Round(VideoProfile.Volume * 100);
+            if (_btnVidMute != null)
+            {
+                string icon = (VideoProfile.IsMuted || VideoProfile.Volume <= 0.01) ? "\uE198" : "\uE15D";
+                _btnVidMute.Text = icon;
+                _btnVidMute.ForeColor = VideoProfile.IsMuted ? Color.FromArgb(170, 170, 170) : Color.White;
+            }
+            if (_vidVolCustomBar != null)
+            {
+                _vidVolCustomBar.Invalidate();
+            }
+            if (_currentVideo != null && _lblVideoSubInfo != null)
+            {
+                _lblVideoSubInfo.Text = string.Format("Qualidade {0}p  •  Volume: {1}%",
+                    _config.VideoQualityHeight, pct);
+            }
+        }
+
+        public void ShowVideoAudioRegulatorDialog()
+        {
+            using (var dlg = new Form())
+            {
+                dlg.Text = "Regulador de Áudio & Cache de Vídeos — LiteTube";
+                dlg.Size = new Size(490, 535);
+                dlg.FormBorderStyle = FormBorderStyle.FixedDialog;
+                dlg.StartPosition = FormStartPosition.CenterParent;
+                dlg.BackColor = BgPanel;
+                dlg.ForeColor = TextPrimary;
+                dlg.MaximizeBox = false;
+                dlg.MinimizeBox = false;
+
+                var lblBanner = new Label
+                {
+                    Text = "Este perfil regula APENAS os Vídeos (o volume de Música permanece baixo e separado).",
+                    Font = new Font("Segoe UI", 8.5f, FontStyle.Italic),
+                    ForeColor = AccentBlue,
+                    Location = new Point(18, 12),
+                    Size = new Size(445, 20)
+                };
+
+                var lblVolTitle = new Label
+                {
+                    Text = "",
+                    Font = new Font("Segoe UI Semibold", 10f, FontStyle.Bold),
+                    Location = new Point(18, 36),
+                    Size = new Size(420, 22)
+                };
+
+                var sliderVol = new TrackBar
+                {
+                    Location = new Point(14, 60),
+                    Size = new Size(340, 32),
+                    Minimum = 0,
+                    Maximum = 100,
+                    Value = (int)Math.Round(VideoProfile.Volume * 100),
+                    TickFrequency = 10,
+                    BackColor = BgPanel
+                };
+
+                var btnMuteDlg = CreateFlatButton("🔊 Ativo", 360, 58, 92, 32, BgCard);
+
+                var btnPre40 = CreateFlatButton("🔉 40% Médio", 18, 96, 100, 28, BgCard);
+                var btnPre70 = CreateFlatButton("🎬 70% Cinema", 124, 96, 104, 28, BgCard);
+                var btnPre85 = CreateFlatButton("🔊 85% Padrão", 234, 96, 104, 28, BgCard);
+                var btnPre100 = CreateFlatButton("🔥 100% Máx", 344, 96, 108, 28, BgCard);
+
+                var lblCeilingTitle = new Label
+                {
+                    Text = "",
+                    Font = new Font("Segoe UI Semibold", 9.5f, FontStyle.Bold),
+                    ForeColor = AccentGreen,
+                    Location = new Point(18, 138),
+                    Size = new Size(425, 22)
+                };
+
+                var btnCeil50 = CreateFlatButton("Teto 50%", 18, 164, 135, 30, BgCard);
+                var btnCeil75 = CreateFlatButton("Teto 75%", 160, 164, 135, 30, BgCard);
+                var btnCeil100 = CreateFlatButton("100% (Sem Limite)", 302, 164, 150, 30, BgCard);
+
+                var lblBalanceTitle = new Label
+                {
+                    Text = "",
+                    Font = new Font("Segoe UI Semibold", 9.5f, FontStyle.Bold),
+                    Location = new Point(18, 206),
+                    Size = new Size(320, 22)
+                };
+
+                var btnCenterBalance = CreateFlatButton("Centralizar (0)", 344, 202, 108, 26, BgCard);
+
+                var sliderBalance = new TrackBar
+                {
+                    Location = new Point(14, 232),
+                    Size = new Size(438, 32),
+                    Minimum = -100,
+                    Maximum = 100,
+                    Value = (int)Math.Round(VideoProfile.Balance * 100),
+                    TickFrequency = 25,
+                    BackColor = BgPanel
+                };
+
+                var lblSpeedTitle = new Label
+                {
+                    Text = "",
+                    Font = new Font("Segoe UI Semibold", 9.5f, FontStyle.Bold),
+                    Location = new Point(18, 274),
+                    Size = new Size(420, 22)
+                };
+
+                var btnSpd075 = CreateFlatButton("0.75x", 18, 300, 78, 30, BgCard);
+                var btnSpd100 = CreateFlatButton("1.0x Normal", 102, 300, 96, 30, BgCard);
+                var btnSpd125 = CreateFlatButton("1.25x", 204, 300, 76, 30, BgCard);
+                var btnSpd150 = CreateFlatButton("1.50x", 286, 300, 76, 30, BgCard);
+                var btnSpd200 = CreateFlatButton("2.00x", 368, 300, 84, 30, BgCard);
+
+                var chkAutoPauseMusic = new CheckBox
+                {
+                    Text = "Pausar automaticamente a Música quando eu der Play em um Vídeo",
+                    Checked = _config.AutoPauseMusicWhenVideoPlays,
+                    ForeColor = TextPrimary,
+                    Location = new Point(18, 342),
+                    Size = new Size(440, 24)
+                };
+
+                double thumbCacheMB = ThumbnailCache.GetDiskUsageMB();
+
+                var lblVidCache = new Label
+                {
+                    Text = string.Format("🖼️ Miniaturas em Disco: {0:0.0}/{1} MB  |  🚀 Streaming: Loopback Direto (RAM)",
+                        thumbCacheMB, _config.MaxThumbCacheSizeMB),
+                    Font = new Font("Segoe UI Semibold", 8.8f, FontStyle.Bold),
+                    ForeColor = AccentBlue,
+                    Location = new Point(18, 376),
+                    Size = new Size(330, 32)
+                };
+
+                var btnClearVidCache = CreateFlatButton("🧹 Limpar Thumbs", 352, 374, 104, 30, BgCard);
+
+                var btnClose = CreateFlatButton("✔ Fechar e Salvar", 312, 435, 144, 36, AccentBlue);
+                btnClose.DialogResult = DialogResult.OK;
+
+                Action refreshLabels = () =>
+                {
+                    lblVolTitle.Text = string.Format("🎬 Volume dos Vídeos: {0}% (Saída Efetiva: {1}%)",
+                        (int)Math.Round(VideoProfile.Volume * 100), VideoProfile.EffectivePercent);
+                    btnMuteDlg.Text = VideoProfile.IsMuted ? "🔇 Mutado" : "🔊 Ativo";
+                    btnMuteDlg.BackColor = VideoProfile.IsMuted ? YouTubeRed : BgCard;
+
+                    int ceilPct = (int)Math.Round(VideoProfile.MaxVolumeCeiling * 100);
+                    lblCeilingTitle.Text = string.Format("🛡️ Teto Máximo de Vídeos: {0}%", ceilPct);
+                    btnCeil50.BackColor = ceilPct == 50 ? AccentGreen : BgCard;
+                    btnCeil75.BackColor = ceilPct == 75 ? AccentGreen : BgCard;
+                    btnCeil100.BackColor = ceilPct == 100 ? AccentBlue : BgCard;
+
+                    int balPct = (int)Math.Round(VideoProfile.Balance * 100);
+                    lblBalanceTitle.Text = balPct == 0
+                        ? "🎧 Balanço de Vídeo: Centro (L 50% / R 50%)"
+                        : (balPct < 0 ? string.Format("🎧 Balanço de Vídeo: {0}% Esquerda (L)", Math.Abs(balPct)) : string.Format("🎧 Balanço de Vídeo: {0}% Direita (R)", balPct));
+
+                    lblSpeedTitle.Text = string.Format("⚡ Velocidade do Vídeo: {0:0.00}x", VideoProfile.PlaybackSpeed);
+                    int spd = (int)Math.Round(VideoProfile.PlaybackSpeed * 100);
+                    btnSpd075.BackColor = spd == 75 ? AccentBlue : BgCard;
+                    btnSpd100.BackColor = spd == 100 ? AccentBlue : BgCard;
+                    btnSpd125.BackColor = spd == 125 ? AccentBlue : BgCard;
+                    btnSpd150.BackColor = spd == 150 ? AccentBlue : BgCard;
+                    btnSpd200.BackColor = spd == 200 ? AccentBlue : BgCard;
+                };
+
+                sliderVol.Scroll += (s, e) => { VideoProfile.Volume = sliderVol.Value / 100.0; if (VideoProfile.Volume > 0) VideoProfile.IsMuted = false; ApplyVideoAudioSettings(); refreshLabels(); };
+                btnMuteDlg.Click += (s, e) => { ToggleVideoMute(); refreshLabels(); };
+
+                btnPre40.Click += (s, e) => { sliderVol.Value = 40; VideoProfile.Volume = 0.40; ApplyVideoAudioSettings(); refreshLabels(); };
+                btnPre70.Click += (s, e) => { sliderVol.Value = 70; VideoProfile.Volume = 0.70; ApplyVideoAudioSettings(); refreshLabels(); };
+                btnPre85.Click += (s, e) => { sliderVol.Value = 85; VideoProfile.Volume = 0.85; ApplyVideoAudioSettings(); refreshLabels(); };
+                btnPre100.Click += (s, e) => { sliderVol.Value = 100; VideoProfile.Volume = 1.00; ApplyVideoAudioSettings(); refreshLabels(); };
+
+                btnCeil50.Click += (s, e) => { VideoProfile.MaxVolumeCeiling = 0.50; ApplyVideoAudioSettings(); refreshLabels(); };
+                btnCeil75.Click += (s, e) => { VideoProfile.MaxVolumeCeiling = 0.75; ApplyVideoAudioSettings(); refreshLabels(); };
+                btnCeil100.Click += (s, e) => { VideoProfile.MaxVolumeCeiling = 1.00; ApplyVideoAudioSettings(); refreshLabels(); };
+
+                sliderBalance.Scroll += (s, e) => { VideoProfile.Balance = sliderBalance.Value / 100.0; ApplyVideoAudioSettings(); refreshLabels(); };
+                btnCenterBalance.Click += (s, e) => { sliderBalance.Value = 0; VideoProfile.Balance = 0.0; ApplyVideoAudioSettings(); refreshLabels(); };
+
+                btnSpd075.Click += (s, e) => { VideoProfile.PlaybackSpeed = 0.75; ApplyVideoAudioSettings(); refreshLabels(); };
+                btnSpd100.Click += (s, e) => { VideoProfile.PlaybackSpeed = 1.00; ApplyVideoAudioSettings(); refreshLabels(); };
+                btnSpd125.Click += (s, e) => { VideoProfile.PlaybackSpeed = 1.25; ApplyVideoAudioSettings(); refreshLabels(); };
+                btnSpd150.Click += (s, e) => { VideoProfile.PlaybackSpeed = 1.50; ApplyVideoAudioSettings(); refreshLabels(); };
+                btnSpd200.Click += (s, e) => { VideoProfile.PlaybackSpeed = 2.00; ApplyVideoAudioSettings(); refreshLabels(); };
+
+                chkAutoPauseMusic.CheckedChanged += (s, e) => { _config.AutoPauseMusicWhenVideoPlays = chkAutoPauseMusic.Checked; };
+
+                btnClearVidCache.Click += (s, e) =>
+                {
+                    ThumbnailCache.ClearDiskAndMemoryCache();
+                    lblVidCache.Text = string.Format("🖼️ Miniaturas em Disco: {0:0.0}/{1} MB  |  🚀 Streaming: Loopback Direto (RAM)",
+                        ThumbnailCache.GetDiskUsageMB(), _config.MaxThumbCacheSizeMB);
+                };
+
+                refreshLabels();
+
+                dlg.Controls.AddRange(new Control[]
+                {
+                    lblBanner, lblVolTitle, sliderVol, btnMuteDlg,
+                    btnPre40, btnPre70, btnPre85, btnPre100,
+                    lblCeilingTitle, btnCeil50, btnCeil75, btnCeil100,
+                    lblBalanceTitle, btnCenterBalance, sliderBalance,
+                    lblSpeedTitle, btnSpd075, btnSpd100, btnSpd125, btnSpd150, btnSpd200,
+                    chkAutoPauseMusic, lblVidCache, btnClearVidCache, btnClose
+                });
+
+                dlg.ShowDialog(this);
+                _config.Save();
+            }
+        }
+
+        private void PromptOpenVideoUrl()
+        {
+            using (var form = new Form())
+            {
+                form.Width = 460;
+                form.Height = 180;
+                form.FormBorderStyle = FormBorderStyle.FixedDialog;
+                form.Text = "🔗 Abrir Link de Vídeo do YouTube";
+                form.StartPosition = FormStartPosition.CenterParent;
+                form.BackColor = BgPanel;
+                form.ForeColor = TextPrimary;
+                form.MaximizeBox = false;
+                form.MinimizeBox = false;
+
+                var lbl = new Label { Left = 16, Top = 16, Width = 415, Height = 30, Text = "Cole o link do vídeo do YouTube abaixo para assisti-lo:" };
+                var txt = new TextBox { Left = 16, Top = 50, Width = 415, BackColor = BgCard, ForeColor = TextPrimary, BorderStyle = BorderStyle.FixedSingle };
+
+                if (Clipboard.ContainsText())
+                {
+                    string clip = Clipboard.GetText().Trim();
+                    if (clip.IndexOf("youtube.com", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        clip.IndexOf("youtu.be", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        txt.Text = clip;
+                    }
+                }
+
+                var btnOk = CreateFlatButton("▶ Assistir Vídeo", 220, 92, 120, 32, YouTubeRed);
+                var btnCancel = CreateFlatButton("Cancelar", 346, 92, 85, 32, BgCard);
+                btnOk.DialogResult = DialogResult.OK;
+                btnCancel.DialogResult = DialogResult.Cancel;
+
+                form.Controls.AddRange(new Control[] { lbl, txt, btnOk, btnCancel });
+                form.AcceptButton = btnOk;
+                form.CancelButton = btnCancel;
+
+                if (form.ShowDialog(this) == DialogResult.OK && !string.IsNullOrWhiteSpace(txt.Text))
+                {
+                    string url = txt.Text.Trim();
+                    Task.Run(async () =>
+                    {
+                        SafeInvoke(() => EmitStatus("Buscando informações do vídeo..."));
+                        var res = await _ytService.FetchUrlOrPlaylistAsync(url, _config, false);
+                        SafeInvoke(() =>
+                        {
+                            if (res.Item1.Count > 0)
+                            {
+                                SetSearchResults(res.Item1, "Link Direto");
+                                PlayVideo(res.Item1[0]);
+                            }
+                            else
+                            {
+                                MessageBox.Show(this, "Não foi possível carregar o vídeo desse link.", "Abrir Vídeo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            }
+                        });
+                    });
+                }
+            }
+        }
+
+        private void UpdatePlayPauseButton()
+        {
+            if (_btnVidPlayPause == null) return;
+            string icon;
+            if (_isLoading)
+            {
+                icon = "...";
+            }
+            else if (_vlcPlayer != null && _vlcPlayer.HasEnded)
+            {
+                icon = "\u21BA"; // ↺ Replay
+            }
+            else if (_isPlaying)
+            {
+                icon = "\u23F8"; // ❚❚ Pause
+            }
+            else
+            {
+                icon = "\u25B6"; // ▶ Play
+            }
+            _btnVidPlayPause.Text = icon;
+        }
+
+        private void PlayNextVideo()
+        {
+            if (_openedPlaylistVideos != null && _openedPlaylistVideos.Count > 0 && _currentVideo != null)
+            {
+                int idx = _openedPlaylistVideos.FindIndex(x => x.Id == _currentVideo.Id);
+                if (idx >= 0 && idx + 1 < _openedPlaylistVideos.Count)
+                {
+                    PlayVideo(_openedPlaylistVideos[idx + 1]);
+                    return;
+                }
+            }
+
+            if (_relatedRowCards != null && _relatedRowCards.Items != null && _relatedRowCards.Items.Count > 0)
+            {
+                var next = _relatedRowCards.Items.Find(x => x.Id != (_currentVideo != null ? _currentVideo.Id : ""));
+                if (next != null)
+                {
+                    PlayVideo(next);
+                    return;
+                }
+            }
+        }
+
+        private Button CreateChipButton(string text, int x, int y, int w, int h, bool active)
+        {
+            var btn = new ModernButton
+            {
+                Text = text,
+                Location = new Point(x, y),
+                Size = new Size(w, h),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = active ? TextPrimary : Theme.SurfaceHigh,
+                ForeColor = active ? BgDark : TextPrimary,
+                Font = new Font("Segoe UI Semibold", 9f, FontStyle.Bold),
+                CornerRadius = 16,
+                BorderColor = active ? Color.Empty : Theme.Border,
+                Cursor = Cursors.Hand
+            };
+            btn.FlatAppearance.BorderSize = 0;
+            return btn;
+        }
+
+        private Button CreateChannelTabButton(string text, int x, int y, int w)
+        {
+            var btn = new ModernButton
+            {
+                Text = text,
+                Location = new Point(x, y),
+                Size = new Size(w, 34),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.Transparent,
+                ForeColor = TextSecondary,
+                Font = new Font("Segoe UI Semibold", 10f, FontStyle.Bold),
+                CornerRadius = 10,
+                Cursor = Cursors.Hand
+            };
+            btn.FlatAppearance.BorderSize = 0;
+            return btn;
+        }
+
+        private Button CreateFlatButton(string text, int x, int y, int w, int h, Color bg)
+        {
+            return CreateFlatButton(text, x, y, w, h, bg, -1, Color.Empty);
+        }
+
+        private Button CreateFlatButton(string text, int x, int y, int w, int h, Color bg, int cornerRadius, Color borderColor)
+        {
+            var btn = new ModernButton
+            {
+                Text = text,
+                Location = new Point(x, y),
+                Size = new Size(w, h),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = bg,
+                ForeColor = TextPrimary,
+                CornerRadius = cornerRadius >= 0 ? cornerRadius : Math.Min(h / 2, 16),
+                BorderColor = borderColor != Color.Empty ? borderColor : ((bg == BgCard || bg == Theme.SurfaceHigh) ? Theme.Border : Color.Empty),
+                Cursor = Cursors.Hand
+            };
+            btn.FlatAppearance.BorderSize = 0;
+            return btn;
+        }
+
+        private void EmitStatus(string msg)
+        {
+            if (StatusNotification != null) StatusNotification(msg);
+        }
+
+        private void SafeInvoke(Action action)
+        {
+            if (IsDisposed) return;
+            if (InvokeRequired)
+            {
+                try { BeginInvoke(action); } catch { }
+            }
+            else
+            {
+                action();
+            }
+        }
+    }
+}
