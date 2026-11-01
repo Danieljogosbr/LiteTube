@@ -1346,7 +1346,13 @@ namespace LiteTube
 
         private string RunYtDlpFastUrl(string arguments, int timeoutMs)
         {
-            string outStr = RunYtDlpProcess(arguments, timeoutMs);
+            string err;
+            return RunYtDlpFastUrl(arguments, timeoutMs, out err);
+        }
+
+        private string RunYtDlpFastUrl(string arguments, int timeoutMs, out string stdErr)
+        {
+            string outStr = RunYtDlpProcessWithError(arguments, timeoutMs, out stdErr);
             if (!string.IsNullOrEmpty(outStr))
             {
                 string[] lines = outStr.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
@@ -1360,6 +1366,117 @@ namespace LiteTube
                 }
             }
             return null;
+        }
+
+        private static bool IsVideoUnavailableError(string stdErr)
+        {
+            if (string.IsNullOrEmpty(stdErr)) return false;
+            return stdErr.IndexOf("Video unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   stdErr.IndexOf("This video is not available", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   stdErr.IndexOf("Private video", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   stdErr.IndexOf("This video has been removed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   stdErr.IndexOf("Account terminated", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private string TryResolveReplacementVideoId(TrackItem track, AppConfig config)
+        {
+            if (track == null || string.IsNullOrWhiteSpace(track.Title)) return null;
+
+            string query = track.Title.Trim();
+            if (!string.IsNullOrWhiteSpace(track.Artist) &&
+                !track.Artist.Equals("YouTube", StringComparison.OrdinalIgnoreCase) &&
+                query.IndexOf(track.Artist.Trim(), StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                query = track.Artist.Trim() + " - " + query;
+            }
+
+            var candidates = new List<TrackItem>();
+            try
+            {
+                string escapedQuery = EscapeJson(query);
+                string payload = "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"2.20240530.01.00\",\"hl\":\"pt\",\"gl\":\"BR\"}},\"query\":\"" + escapedQuery + "\"}";
+                string jsonResponse = PostInnerTube("https://www.youtube.com/youtubei/v1/search?prettyPrint=false", payload, config);
+                var page = ParseInnerTubeSearchPage(jsonResponse, false, false);
+                if (page != null && page.Items != null)
+                {
+                    candidates.AddRange(page.Items);
+                }
+            }
+            catch { }
+
+            if (candidates.Count == 0 && File.Exists(_ytDlpPath))
+            {
+                try
+                {
+                    candidates.AddRange(FallbackYtDlpSearch(query, 6));
+                }
+                catch { }
+            }
+
+            string fallbackId = null;
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                var c = candidates[i];
+                if (c == null || c.IsChannel || c.IsPlaylistCard) continue;
+                if (string.IsNullOrWhiteSpace(c.Id) || string.Equals(c.Id, track.Id, StringComparison.OrdinalIgnoreCase)) continue;
+
+                if (fallbackId == null) fallbackId = c.Id;
+
+                if (track.DurationSeconds > 0 && c.DurationSeconds > 0)
+                {
+                    if (Math.Abs(c.DurationSeconds - track.DurationSeconds) <= 60)
+                    {
+                        return c.Id;
+                    }
+                }
+                else if (track.DurationSeconds <= 0)
+                {
+                    return c.Id;
+                }
+            }
+
+            return fallbackId;
+        }
+
+        private static void HealTrackIdInConfig(AppConfig config, string oldId, string newId)
+        {
+            if (config == null || string.IsNullOrEmpty(oldId) || string.IsNullOrEmpty(newId)) return;
+            bool changed = false;
+            try
+            {
+                if (config.Playlists != null)
+                {
+                    for (int p = 0; p < config.Playlists.Count; p++)
+                    {
+                        var pl = config.Playlists[p];
+                        if (pl == null || pl.Tracks == null) continue;
+                        for (int t = 0; t < pl.Tracks.Count; t++)
+                        {
+                            if (pl.Tracks[t] != null && string.Equals(pl.Tracks[t].Id, oldId, StringComparison.OrdinalIgnoreCase))
+                            {
+                                pl.Tracks[t].Id = newId;
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+                if (config.Favorites != null)
+                {
+                    for (int f = 0; f < config.Favorites.Count; f++)
+                    {
+                        if (config.Favorites[f] != null && string.Equals(config.Favorites[f].Id, oldId, StringComparison.OrdinalIgnoreCase))
+                        {
+                            config.Favorites[f].Id = newId;
+                            changed = true;
+                        }
+                    }
+                }
+                if (changed)
+                {
+                    config.Save();
+                }
+            }
+            catch { }
         }
 
         private bool DownloadWithFfmpeg(string sourceUrl, string outputFile, int timeoutMs)
@@ -1410,6 +1527,7 @@ namespace LiteTube
                 if (info.Length > 10240)
                 {
                     try { File.SetLastWriteTimeUtc(cachedFile, DateTime.UtcNow); } catch { }
+                    Logger.Info("MUSIC", string.Format("Reproduzindo do cache local: Id={0} ('{1}')", track.Id, track.Title));
                     return cachedFile;
                 }
             }
@@ -1420,55 +1538,85 @@ namespace LiteTube
             {
                 if (token.IsCancellationRequested) return null;
 
+                Logger.Info("MUSIC", string.Format("Resolvendo stream de áudio: Id={0}, Title='{1}', Artist='{2}'", track.Id, track.Title, track.Artist));
+
                 string videoUrl = "https://www.youtube.com/watch?v=" + track.Id;
                 string cookieArg = GetCookieArg(config);
                 string denoPath = Path.Combine(_binDir, "deno.exe");
                 string jsArg = File.Exists(denoPath) ? string.Format("--js-runtimes \"deno:{0}\" ", denoPath) : "";
-                string formatSelector = "140/bestaudio[ext=m4a]/18/best[ext=mp4]";
+                string formatSelector = "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio";
 
-                // Step 1: Blazing fast URL extraction via VisionOS client (~2s, bypasses bot check and 5s sleep)
-                string directUrl = RunYtDlpFastUrl(string.Format("--no-playlist --extractor-args \"youtube:player_client=visionos;player_skip=hls\" -f \"{0}\" -g \"{1}\"", formatSelector, videoUrl), 8000);
+                // Step 1: Extração rápida via yt-dlp com cookies e Deno JS runtime (pipeline padrão estável)
+                string attempt1Args = string.Format(
+                    "{0}{1}--no-playlist --extractor-args \"youtube:player_skip=hls\" -f \"{2}\" -g \"{3}\"",
+                    !string.IsNullOrEmpty(cookieArg) ? cookieArg : "",
+                    jsArg,
+                    formatSelector,
+                    videoUrl
+                );
+                string stdErr1;
+                string directUrl = RunYtDlpFastUrl(attempt1Args, 15000, out stdErr1);
 
-                // Step 2: Fallback with Deno JS challenge runtime if VisionOS didn't return
+                // Auto-recuperação imediata quando o ID salvo na playlist foi derrubado/substituído no YouTube ("Video unavailable")
+                if (string.IsNullOrEmpty(directUrl) && IsVideoUnavailableError(stdErr1) && !token.IsCancellationRequested)
+                {
+                    Logger.Warn("MUSIC", string.Format("Vídeo original indisponível no YouTube (Id={0}, '{1} - {2}'). Buscando versão ativa equivalente...", track.Id, track.Artist, track.Title));
+                    string replacementId = TryResolveReplacementVideoId(track, config);
+                    if (!string.IsNullOrEmpty(replacementId) && !string.Equals(replacementId, track.Id, StringComparison.OrdinalIgnoreCase))
+                    {
+                        string oldId = track.Id;
+                        track.Id = replacementId;
+                        safeId = Regex.Replace(replacementId, "[^a-zA-Z0-9_-]", "");
+                        cachedFile = Path.Combine(_cacheDir, safeId + ".m4a");
+                        videoUrl = "https://www.youtube.com/watch?v=" + replacementId;
+
+                        HealTrackIdInConfig(config, oldId, replacementId);
+                        Logger.Info("MUSIC", string.Format("Faixa auto-reparada na playlist: '{0}' ({1} -> {2})", track.Title, oldId, replacementId));
+
+                        if (File.Exists(cachedFile) && new FileInfo(cachedFile).Length > 10240)
+                        {
+                            try { File.SetLastWriteTimeUtc(cachedFile, DateTime.UtcNow); } catch { }
+                            return cachedFile;
+                        }
+
+                        attempt1Args = string.Format(
+                            "{0}{1}--no-playlist --extractor-args \"youtube:player_skip=hls\" -f \"{2}\" -g \"{3}\"",
+                            !string.IsNullOrEmpty(cookieArg) ? cookieArg : "",
+                            jsArg,
+                            formatSelector,
+                            videoUrl
+                        );
+                        directUrl = RunYtDlpFastUrl(attempt1Args, 15000, out stdErr1);
+                    }
+                    else
+                    {
+                        Logger.Error("MUSIC", string.Format("Falha ao localizar substituto ativo para faixa indisponível: Id={0} ('{1}')", track.Id, track.Title));
+                        return null;
+                    }
+                }
+
+                // Step 2: Fallback sem cookies
                 if (string.IsNullOrEmpty(directUrl) && !token.IsCancellationRequested)
                 {
-                    directUrl = RunYtDlpFastUrl(string.Format("{0}--no-playlist --extractor-args \"youtube:player_skip=hls\" -f \"{1}\" -g \"{2}\"", jsArg, formatSelector, videoUrl), 15000);
+                    string attempt2Args = string.Format(
+                        "{0}--no-playlist --extractor-args \"youtube:player_skip=hls\" -f \"{1}\" -g \"{2}\"",
+                        jsArg,
+                        formatSelector,
+                        videoUrl
+                    );
+                    directUrl = RunYtDlpFastUrl(attempt2Args, 15000);
                 }
 
-                // Step 3: Fallback with account cookies
-                if (string.IsNullOrEmpty(directUrl) && !string.IsNullOrEmpty(cookieArg) && !token.IsCancellationRequested)
+                // Step 3: Fallback via client visionos
+                if (string.IsNullOrEmpty(directUrl) && !token.IsCancellationRequested)
                 {
-                    directUrl = RunYtDlpFastUrl(string.Format("{0}--no-playlist --extractor-args \"youtube:player_client=visionos;player_skip=hls\" -f \"{1}\" -g \"{2}\"", cookieArg, formatSelector, videoUrl), 15000);
+                    directUrl = RunYtDlpFastUrl(string.Format("--no-playlist --extractor-args \"youtube:player_client=visionos;player_skip=hls\" -f \"{0}\" -g \"{1}\"", formatSelector, videoUrl), 8000);
                 }
 
-                // Step 4: If directUrl resolved and ffmpeg exists, download at full unthrottled line speed (~250ms for 3.5MB)!
-                if (!string.IsNullOrEmpty(directUrl) && File.Exists(_ffmpegPath) && !token.IsCancellationRequested)
+                // If directUrl resolved, return directly for instant zero-disk streaming via LibVLC & loopback proxy!
+                if (!string.IsNullOrEmpty(directUrl))
                 {
-                    string tempFile = Path.Combine(_cacheDir, safeId + "_" + Guid.NewGuid().ToString("N").Substring(0, 6) + ".m4a");
-                    bool ok = DownloadWithFfmpeg(directUrl, tempFile, 20000);
-                    if (ok && File.Exists(tempFile) && new FileInfo(tempFile).Length > 10240)
-                    {
-                        lock (_cacheLock)
-                        {
-                            for (int att = 0; att < 5; att++)
-                            {
-                                try
-                                {
-                                    if (File.Exists(cachedFile)) File.Delete(cachedFile);
-                                    File.Move(tempFile, cachedFile);
-                                    File.SetLastWriteTimeUtc(cachedFile, DateTime.UtcNow);
-                                    break;
-                                }
-                                catch { Thread.Sleep(80); }
-                            }
-                        }
-                        EnforceCacheSizeLimit(maxCacheMB);
-                        if (File.Exists(cachedFile)) return cachedFile;
-                        return tempFile;
-                    }
-                    TryDeleteFile(tempFile);
-
-                    // If file writing failed, return directUrl directly for zero-delay instant streaming!
+                    Logger.Info("MUSIC", string.Format("Stream direto resolvido com sucesso para Id={0} ('{1}')", track.Id, track.Title));
                     return directUrl;
                 }
 
@@ -1511,12 +1659,14 @@ namespace LiteTube
                             }
                         }
                         EnforceCacheSizeLimit(maxCacheMB);
+                        Logger.Info("MUSIC", string.Format("Download fallback concluído para Id={0} ('{1}')", track.Id, track.Title));
                         return cachedFile;
                     }
                     TryDeleteFile(tempFile);
                 }
 
                 if (!string.IsNullOrEmpty(directUrl)) return directUrl;
+                Logger.Error("MUSIC", string.Format("Não foi possível resolver áudio para Id={0} ('{1}') após todas as tentativas.", track.Id, track.Title));
                 return null;
             }, token);
         }

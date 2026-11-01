@@ -210,24 +210,11 @@ namespace LiteTube
                         catch { }
                     }
 
-                    // 2. Verificação de Viewport pré-fila: se o card não está visível, não enfileira na rede
-                    if (!CheckVisibilitySafe(safeId))
-                    {
-                        return;
-                    }
-
-                    // 3. Fila de conexões simultâneas (10 downloads simultâneos)
+                    // 2. Fila de conexões simultâneas (10 downloads simultâneos)
                     await _downloadSemaphore.WaitAsync().ConfigureAwait(false);
                     try
                     {
-                        // 4. Verificação de Viewport pós-fila: se saiu da tela durante a espera na fila,
-                        // libera imediatamente o slot para o próximo card visível
-                        if (!CheckVisibilitySafe(safeId))
-                        {
-                            return;
-                        }
-
-                        // 5. Download isolado por item com retentativa pontual
+                        // 3. Download isolado por item com retentativa pontual
                         byte[] bytes = DownloadThumbnailBytes(safeId, customUrl);
                         if (bytes != null && bytes.Length > 500)
                         {
@@ -298,11 +285,6 @@ namespace LiteTube
             int maxAttempts = 2;
             for (int attempt = 1; attempt <= maxAttempts; attempt++)
             {
-                if (!CheckVisibilitySafe(safeId))
-                {
-                    return null;
-                }
-
                 HttpWebRequest req = null;
                 try
                 {
@@ -311,8 +293,7 @@ namespace LiteTube
                     req.Headers.Set(HttpRequestHeader.AcceptLanguage, "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7");
                     req.Headers.Set(HttpRequestHeader.AcceptEncoding, "gzip, deflate");
                     req.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
-                    req.Referer = "https://www.youtube.com/";
-                    req.Accept = "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8";
+                    req.Accept = "image/jpeg,image/png,image/*;q=0.8";
                     req.Timeout = 8000;
                     req.ReadWriteTimeout = 8000;
                     req.KeepAlive = true;
@@ -401,17 +382,7 @@ namespace LiteTube
 
         private static bool CheckVisibilitySafe(string safeId)
         {
-            var check = IsVisibleCheck;
-            if (check == null) return true;
-            try
-            {
-                if (safeId.StartsWith("ch_", StringComparison.OrdinalIgnoreCase)) return true;
-                return check(safeId);
-            }
-            catch
-            {
-                return true;
-            }
+            return true;
         }
 
         private static void DispatchCallbacks(List<Action> callbacks)

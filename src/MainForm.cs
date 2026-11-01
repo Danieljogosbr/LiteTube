@@ -851,6 +851,11 @@ namespace LiteTube
             _activeEnvironment = env;
             Logger.Info("ENV", "Alternando ambiente para: " + env);
 
+            if (_nowPlayingThumb != null)
+            {
+                _nowPlayingThumb.Image = null;
+            }
+
             bool isMusic = (env == "music");
 
             if (!isMusic && _videoEnvironmentControl.IsFullscreen)
@@ -898,7 +903,6 @@ namespace LiteTube
                     {
                         _musicCardList.ResumeAndAttach();
                     }
-                    ThumbnailCache.IsVisibleCheck = (id) => _musicCardList.IsItemVisible(id);
                     _musicCardList.PruneOffscreenResources();
                 }
             }
@@ -938,6 +942,12 @@ namespace LiteTube
                 {
                     _videoEnvironmentControl.ResumeFromBackground();
                 }
+            }
+
+            if (_nowPlayingThumb != null && _activeEnvironment == "video")
+            {
+                _nowPlayingThumb.Image = null;
+                _nowPlayingThumb.Invalidate();
             }
 
             ThumbnailCache.ClearMemoryCache();
@@ -1329,7 +1339,10 @@ namespace LiteTube
             _musicAudio.TrackChanged += t => SafeInvoke(() => OnTrackChanged(t));
             _musicAudio.PlaybackStateChanged += (playing, loading) => SafeInvoke(() => OnPlaybackStateChanged(playing, loading));
             _musicAudio.StatusMessage += msg => SafeInvoke(() => _lblStatus.Text = msg);
-            _musicAudio.AudioSettingsChanged += () => SafeInvoke(UpdateMusicAudioRegulatorUI);
+            _musicAudio.AudioSettingsChanged += () => SafeInvoke(() =>
+            {
+                UpdateMusicAudioRegulatorUI();
+            });
             _musicAudio.QueueUpdated += () => SafeInvoke(() =>
             {
                 if (_activeSection == "queue")
@@ -1514,14 +1527,34 @@ namespace LiteTube
             Rectangle rect = new Rectangle(0, 0, _nowPlayingThumb.Width - 1, _nowPlayingThumb.Height - 1);
             using (var path = Theme.RoundRect(rect, 8))
             {
-                if (_nowPlayingThumb.Image != null)
+                bool drewImage = false;
+                Image currentImg = _nowPlayingThumb.Image;
+                if (currentImg != null)
                 {
-                    Region oldClip = g.Clip;
-                    g.SetClip(path);
-                    g.DrawImage(_nowPlayingThumb.Image, rect);
-                    g.Clip = oldClip;
+                    try
+                    {
+                        if (currentImg.Width > 0 && currentImg.Height > 0)
+                        {
+                            Region oldClip = g.Clip;
+                            g.SetClip(path);
+                            g.DrawImage(currentImg, rect);
+                            g.Clip = oldClip;
+                            drewImage = true;
+                        }
+                    }
+                    catch (ArgumentException)
+                    {
+                        _nowPlayingThumb.Image = null;
+                        drewImage = false;
+                    }
+                    catch
+                    {
+                        _nowPlayingThumb.Image = null;
+                        drewImage = false;
+                    }
                 }
-                else
+
+                if (!drewImage)
                 {
                     using (var br = new SolidBrush(Theme.SurfaceHigh))
                     {
@@ -1547,11 +1580,11 @@ namespace LiteTube
                 new Rectangle(0, 0, _volCustomBar.Width, _volCustomBar.Height),
                 _musicAudio.Volume,
                 _musicAudio.IsMuted,
-                _musicAudio.MaxVolumeCeiling < 0.99,
+                false,
                 AccentRed,
                 _isDraggingVolumeBar,
                 _isHoveringMusicVolBar,
-                "MÚSICA"
+                "VOLUME"
             );
         }
 
@@ -1589,7 +1622,7 @@ namespace LiteTube
 
                 var lblBanner = new Label
                 {
-                    Text = "ℹ️ Este perfil regula APENAS as Músicas (os Vídeos têm volume alto próprio e separado).",
+                    Text = "ℹ️ Este perfil regula exclusivamente o Volume de MÚSICA (1:1 direto na saída de som).",
                     Font = new Font("Segoe UI", 8.5f, FontStyle.Italic),
                     ForeColor = Color.FromArgb(255, 120, 140),
                     Location = new Point(18, 12),
@@ -1701,19 +1734,18 @@ namespace LiteTube
 
                 Action refreshDialogLabels = () =>
                 {
-                    lblVolTitle.Text = string.Format("🎵 Volume de Música: {0}% (Saída Efetiva: {1}%)",
-                        (int)Math.Round(_musicAudio.Volume * 100), (int)_musicAudio.EffectiveOutputVolumePercent);
-                    btnMuteDlg.Text = _musicAudio.IsMuted ? "🔇 Mutado" : "🔊 Ativo";
-                    btnMuteDlg.BackColor = _musicAudio.IsMuted ? AccentRed : BgCard;
+                    lblVolTitle.Text = string.Format("🎵 Volume da Música: {0}%",
+                        (int)Math.Round(_config.MusicVolume * 100));
+                    btnMuteDlg.Text = _config.IsMusicMuted ? "🔇 Mutado" : "🔊 Ativo";
+                    btnMuteDlg.BackColor = _config.IsMusicMuted ? AccentRed : BgCard;
 
-                    int ceilPct = (int)Math.Round(_musicAudio.MaxVolumeCeiling * 100);
-                    lblCeilingTitle.Text = string.Format("🛡️ Teto Limitador de Música: {0}% — impede picos altos", ceilPct);
-                    btnCeil20.BackColor = ceilPct == 20 ? AccentGreen : BgCard;
-                    btnCeil40.BackColor = ceilPct == 40 ? AccentGreen : BgCard;
-                    btnCeil70.BackColor = ceilPct == 70 ? AccentGreen : BgCard;
-                    btnCeil100.BackColor = ceilPct == 100 ? AccentRed : BgCard;
+                    lblCeilingTitle.Text = "🛡️ Escala 1:1 Linear: 0% a 100% (Sem Teto Artificial)";
+                    btnCeil20.BackColor = BgCard;
+                    btnCeil40.BackColor = BgCard;
+                    btnCeil70.BackColor = BgCard;
+                    btnCeil100.BackColor = AccentRed;
 
-                    lblBalanceTitle.Text = FormatBalanceLabel(_musicAudio.Balance);
+                    lblBalanceTitle.Text = "🎧 Balanço: Centro (L 50% / R 50%)";
                     lblSpeedTitle.Text = string.Format("⚡ Velocidade da Música: {0:0.00}x", _musicAudio.PlaybackSpeed);
 
                     int spd = (int)Math.Round(_musicAudio.PlaybackSpeed * 100);
@@ -2026,16 +2058,39 @@ namespace LiteTube
                 _lblMiniTitle.Text = track.Title;
                 _lblMiniArtist.Text = track.Artist;
 
-                _nowPlayingThumb.Image = ThumbnailCache.GetOrRequestThumbnail(track.Id, () =>
+                try
                 {
-                    SafeInvoke(() =>
+                    _nowPlayingThumb.Image = null;
+                    Image thumb = ThumbnailCache.GetOrRequestThumbnail(track.Id, () =>
                     {
-                        if (_musicAudio.CurrentTrack != null && _musicAudio.CurrentTrack.Id == track.Id)
+                        SafeInvoke(() =>
                         {
-                            _nowPlayingThumb.Image = ThumbnailCache.GetOrRequestThumbnail(track.Id, null);
-                        }
+                            try
+                            {
+                                if (_musicAudio.CurrentTrack != null && _musicAudio.CurrentTrack.Id == track.Id)
+                                {
+                                    Image loadedImg = ThumbnailCache.GetOrRequestThumbnail(track.Id, null);
+                                    if (loadedImg != null && loadedImg.Width > 0 && loadedImg.Height > 0)
+                                    {
+                                        _nowPlayingThumb.Image = loadedImg;
+                                        _nowPlayingThumb.Invalidate();
+                                    }
+                                }
+                            }
+                            catch { }
+                        });
                     });
-                });
+
+                    if (thumb != null && thumb.Width > 0 && thumb.Height > 0)
+                    {
+                        _nowPlayingThumb.Image = thumb;
+                    }
+                    _nowPlayingThumb.Invalidate();
+                }
+                catch
+                {
+                    _nowPlayingThumb.Image = null;
+                }
 
                 string trayTitle = "▶ " + track.Title;
                 if (trayTitle.Length > 60) trayTitle = trayTitle.Substring(0, 60) + "...";
@@ -2086,6 +2141,8 @@ namespace LiteTube
 
         private void InitHardwareAccelerationOnStartup()
         {
+            VlcPlayer.EnsureInitializedAsync();
+
             System.Threading.Tasks.Task.Run(() =>
             {
                 try
@@ -2654,12 +2711,12 @@ namespace LiteTube
                 else if (id == 1007)
                 {
                     if (controlVideo) _videoEnvironmentControl.ChangeVideoVolumeBy(0.05);
-                    else _musicAudio.ChangeVolumeBy(0.02);
+                    else _musicAudio.ChangeVolumeBy(0.05);
                 }
                 else if (id == 1008)
                 {
                     if (controlVideo) _videoEnvironmentControl.ChangeVideoVolumeBy(-0.05);
-                    else _musicAudio.ChangeVolumeBy(-0.02);
+                    else _musicAudio.ChangeVolumeBy(-0.05);
                 }
                 else if (id == 1009)
                 {

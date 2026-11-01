@@ -12,70 +12,6 @@ namespace LiteTube
         RepeatOne = 2
     }
 
-    public class AudioProfile
-    {
-        private double _volume = 0.50;
-        private double _maxVolumeCeiling = 1.0;
-
-        public double Volume
-        {
-            get { return _volume; }
-            set { _volume = Math.Max(0.0, Math.Min(1.0, value)); }
-        }
-
-        public bool IsMuted { get; set; }
-
-        public double MaxVolumeCeiling
-        {
-            get { return _maxVolumeCeiling; }
-            set { _maxVolumeCeiling = Math.Max(0.05, Math.Min(1.0, value)); }
-        }
-
-        public double Balance { get; set; }
-        public double PlaybackSpeed { get; set; }
-
-        public AudioProfile()
-        {
-            Volume = 0.50;
-            IsMuted = false;
-            MaxVolumeCeiling = 1.0;
-            Balance = 0.0;
-            PlaybackSpeed = 1.0;
-        }
-
-        public AudioProfile(double defaultVol, double defaultCeiling)
-        {
-            Volume = defaultVol;
-            IsMuted = false;
-            MaxVolumeCeiling = defaultCeiling;
-            Balance = 0.0;
-            PlaybackSpeed = 1.0;
-        }
-
-        public double EffectiveVolume
-        {
-            get
-            {
-                if (IsMuted) return 0.0;
-                double eff = _volume * _maxVolumeCeiling;
-                return Math.Max(0.0, Math.Min(1.0, eff));
-            }
-        }
-
-        public int EffectivePercent
-        {
-            get { return (int)Math.Round(EffectiveVolume * 100.0); }
-        }
-
-        public void Validate()
-        {
-            _volume = Math.Max(0.0, Math.Min(1.0, _volume));
-            _maxVolumeCeiling = Math.Max(0.05, Math.Min(1.0, _maxVolumeCeiling));
-            if (Balance < -1.0 || Balance > 1.0) Balance = 0.0;
-            if (PlaybackSpeed < 0.25 || PlaybackSpeed > 3.0) PlaybackSpeed = 1.0;
-        }
-    }
-
     public class TrackItem
     {
         public string Id { get; set; }
@@ -210,11 +146,15 @@ namespace LiteTube
         public string BrowserForCookies { get; set; }
         public string CookiesFilePath { get; set; }
 
-        // Distinct Audio Profiles for Music vs Video environments
-        public AudioProfile MusicAudio { get; set; }
-        public AudioProfile VideoAudio { get; set; }
+        // Independent Video & Music Volumes (1:1 Direct Linear Mapping)
+        public double VideoVolume { get; set; }
+        public bool IsVideoMuted { get; set; }
+        public double MusicVolume { get; set; }
+        public bool IsMusicMuted { get; set; }
 
         // Legacy fields kept only for automatic migration from older config.json
+        public double? MasterVolume { get; set; }
+        public bool? IsMasterMuted { get; set; }
         public double? Volume { get; set; }
         public bool? IsMuted { get; set; }
         public double? MaxVolumeCeiling { get; set; }
@@ -246,9 +186,10 @@ namespace LiteTube
             BrowserForCookies = "firefox";
             CookiesFilePath = "";
 
-            // Default: Music starts very low (12%) for background/gaming; Video starts loud and clear (85%)
-            MusicAudio = new AudioProfile(0.12, 1.0);
-            VideoAudio = new AudioProfile(0.85, 1.0);
+            VideoVolume = 0.85; // Padrão: 85% para Vídeos
+            IsVideoMuted = false;
+            MusicVolume = 0.50; // Padrão: 50% para Música
+            IsMusicMuted = false;
 
             VideoQualityHeight = 720;
             AutoPauseMusicWhenVideoPlays = true;
@@ -307,29 +248,25 @@ namespace LiteTube
                         if (cfg.Playlists == null) cfg.Playlists = new List<UserPlaylist>();
                         if (string.IsNullOrEmpty(cfg.BrowserForCookies)) cfg.BrowserForCookies = "firefox";
 
-                        if (cfg.MusicAudio == null)
+                        // Validate and migrate independent VideoVolume and MusicVolume
+                        if (cfg.VideoVolume <= 0.001 || cfg.VideoVolume > 1.0)
                         {
-                            double migratedVol = cfg.Volume.HasValue ? cfg.Volume.Value : 0.12;
-                            double migratedCeil = cfg.MaxVolumeCeiling.HasValue ? cfg.MaxVolumeCeiling.Value : 1.0;
-                            cfg.MusicAudio = new AudioProfile(migratedVol, migratedCeil);
-                            if (cfg.IsMuted.HasValue) cfg.MusicAudio.IsMuted = cfg.IsMuted.Value;
-                            if (cfg.Balance.HasValue) cfg.MusicAudio.Balance = cfg.Balance.Value;
-                            if (cfg.PlaybackSpeed.HasValue) cfg.MusicAudio.PlaybackSpeed = cfg.PlaybackSpeed.Value;
+                            if (cfg.MasterVolume.HasValue && cfg.MasterVolume.Value > 0.01 && cfg.MasterVolume.Value <= 1.0)
+                                cfg.VideoVolume = cfg.MasterVolume.Value;
+                            else
+                                cfg.VideoVolume = 0.85;
                         }
-                        if (cfg.VideoAudio == null)
+                        if (cfg.MusicVolume <= 0.001 || cfg.MusicVolume > 1.0)
                         {
-                            cfg.VideoAudio = new AudioProfile(0.85, 1.0);
+                            if (cfg.Volume.HasValue && cfg.Volume.Value > 0.01 && cfg.Volume.Value <= 1.0)
+                                cfg.MusicVolume = cfg.Volume.Value;
+                            else
+                                cfg.MusicVolume = 0.50;
                         }
-                        else
-                        {
-                            if (cfg.VideoAudio.Volume < 0.35) cfg.VideoAudio.Volume = 0.85;
-                            cfg.VideoAudio.IsMuted = false;
-                        }
-
-                        cfg.MusicAudio.Validate();
-                        cfg.VideoAudio.Validate();
 
                         // Clear legacy fields after migration
+                        cfg.MasterVolume = null;
+                        cfg.IsMasterMuted = null;
                         cfg.Volume = null;
                         cfg.IsMuted = null;
                         cfg.MaxVolumeCeiling = null;

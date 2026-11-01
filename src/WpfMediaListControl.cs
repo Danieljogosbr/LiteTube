@@ -1378,18 +1378,21 @@ namespace LiteTube
 
             try
             {
+                byte[] buffer;
+                using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                using (var ms = new MemoryStream((int)fs.Length))
+                {
+                    fs.CopyTo(ms);
+                    buffer = ms.ToArray();
+                }
+
                 var bitmap = new BitmapImage();
                 bitmap.BeginInit();
-                // Ignora o cache interno global do WPF para permitir coleta pelo Garbage Collector
-                bitmap.CreateOptions = BitmapCreateOptions.IgnoreImageCache;
-                // Carrega apenas os bytes necessrios na hora e fecha o arquivo imediatamente
                 bitmap.CacheOption = BitmapCacheOption.OnLoad;
-                bitmap.UriSource = new Uri(filePath, UriKind.Absolute);
-                // Decodifica estritamente na resoluo necessria do card (reduz 80% da VRAM/RAM)
-                bitmap.DecodePixelWidth = 320; 
+                bitmap.StreamSource = new MemoryStream(buffer);
+                bitmap.DecodePixelWidth = 320;
                 bitmap.EndInit();
-                
-                // O Freeze() desvincula a imagem de afinidade de thread e otimiza o uso de memria no WPF
+
                 if (bitmap.CanFreeze)
                     bitmap.Freeze();
 

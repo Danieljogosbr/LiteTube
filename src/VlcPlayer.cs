@@ -119,13 +119,13 @@ namespace LiteTube
         private string _lastAudioUrl = null;
         private readonly System.Diagnostics.Stopwatch _stopwatch = new System.Diagnostics.Stopwatch();
         private double _stopwatchBaseSeconds = 0.0;
+        private System.Threading.Timer _stateMonitorTimer;
+        private int _lastObservedState = 0;
 
-#pragma warning disable 0067
         public event Action OnPlaying;
         public event Action OnPaused;
         public event Action OnStopped;
         public event Action OnEndReached;
-#pragma warning restore 0067
 
         public static bool EnsureInitialized()
         {
@@ -145,10 +145,7 @@ namespace LiteTube
                         "--no-snapshot-preview",
                         "--avcodec-hw=any",
                         "--http-reconnect",
-                        "--no-mouse-events",
-                        "--aout=wasapi",
-                        "--audio-resampler=speex",
-                        "--gain=1.0"
+                        "--no-mouse-events"
                     };
 
                     IntPtr[] ptrs = new IntPtr[vlcArgs.Length];
@@ -184,6 +181,11 @@ namespace LiteTube
             }
         }
 
+        public static Task<bool> EnsureInitializedAsync()
+        {
+            return Task.Run(() => EnsureInitialized());
+        }
+
         public VlcPlayer(IntPtr windowHandle)
         {
             _hwnd = windowHandle;
@@ -196,6 +198,64 @@ namespace LiteTube
                     libvlc_media_player_set_hwnd(_mediaPlayer, _hwnd);
                 }
             }
+            _stateMonitorTimer = new System.Threading.Timer(CheckPlayerStateTick, null, 200, 200);
+        }
+
+        public static int MapLinearPercentToVlcVolume(int linearPercent, bool isMuted)
+        {
+            if (isMuted || linearPercent <= 0) return 0;
+            if (linearPercent >= 100) return 100;
+            double normalized = linearPercent / 100.0;
+            // Compensa a curva cúbica interna do módulo mmdevice da LibVLC: (x^(1/3))^3 = x
+            int vlcVol = (int)Math.Round(Math.Pow(normalized, 1.0 / 3.0) * 100.0);
+            return Math.Max(0, Math.Min(100, vlcVol));
+        }
+
+        private void ApplyVolumeToNative()
+        {
+            if (_mediaPlayer == IntPtr.Zero) return;
+            try
+            {
+                libvlc_audio_set_mute(_mediaPlayer, _isMuted ? 1 : 0);
+                int safeVol = MapLinearPercentToVlcVolume(_cachedVolume, _isMuted);
+                libvlc_audio_set_volume(_mediaPlayer, safeVol);
+            }
+            catch { }
+        }
+
+        private void CheckPlayerStateTick(object state)
+        {
+            if (_isDisposed || _mediaPlayer == IntPtr.Zero) return;
+            try
+            {
+                int st = libvlc_media_player_get_state(_mediaPlayer);
+                if (st != _lastObservedState)
+                {
+                    _lastObservedState = st;
+                    if (st == 6) // libvlc_Ended
+                    {
+                        var handler = OnEndReached;
+                        if (handler != null) handler();
+                    }
+                    else if (st == 3) // libvlc_Playing: o dispositivo aout acabou de ser criado e aberto
+                    {
+                        ApplyVolumeToNative();
+                        var handler = OnPlaying;
+                        if (handler != null) handler();
+                    }
+                    else if (st == 4) // libvlc_Paused
+                    {
+                        var handler = OnPaused;
+                        if (handler != null) handler();
+                    }
+                    else if (st == 5) // libvlc_Stopped
+                    {
+                        var handler = OnStopped;
+                        if (handler != null) handler();
+                    }
+                }
+            }
+            catch { }
         }
 
         public void SetHwnd(IntPtr hwnd)
@@ -215,6 +275,9 @@ namespace LiteTube
             _stopwatchBaseSeconds = startSeconds;
             _stopwatch.Restart();
 
+            int safeVol = Math.Max(0, Math.Min(100, _isMuted ? 0 : _cachedVolume));
+            _cachedVolume = safeVol;
+
             PlayStreamInternal(videoUrl, audioUrl, durationSeconds, startSeconds);
         }
 
@@ -223,6 +286,7 @@ namespace LiteTube
             if (_mediaPlayer == IntPtr.Zero || _vlcInstance == IntPtr.Zero) return;
 
             StopInternal();
+            _lastObservedState = 0;
 
             _stopwatchBaseSeconds = startSeconds;
             _stopwatch.Restart();
@@ -269,13 +333,21 @@ namespace LiteTube
                 }
 
                 libvlc_media_player_play(_mediaPlayer);
-                try
+                ApplyVolumeToNative();
+
+                Task.Run(async () =>
                 {
-                    int safeVol = Math.Max(0, Math.Min(100, _isMuted ? 0 : _cachedVolume));
-                    libvlc_audio_set_volume(_mediaPlayer, safeVol);
-                    libvlc_audio_set_mute(_mediaPlayer, _isMuted ? 1 : 0);
-                }
-                catch { }
+                    for (int i = 0; i < 10; i++)
+                    {
+                        await Task.Delay(100);
+                        if (_mediaPlayer != IntPtr.Zero && IsPlaying)
+                        {
+                            ApplyVolumeToNative();
+                            break;
+                        }
+                    }
+                });
+
                 Logger.Info("VLC", string.Format("PlayStream iniciado: dur={0:0.0}s, start={1:0.0}s, vol={2}%", durationSeconds, startSeconds, _cachedVolume));
             }
             catch (Exception ex)
@@ -314,6 +386,20 @@ namespace LiteTube
 
                 _stopwatch.Start();
                 libvlc_media_player_play(_mediaPlayer);
+                ApplyVolumeToNative();
+
+                Task.Run(async () =>
+                {
+                    for (int i = 0; i < 10; i++)
+                    {
+                        await Task.Delay(100);
+                        if (_mediaPlayer != IntPtr.Zero && IsPlaying)
+                        {
+                            ApplyVolumeToNative();
+                            break;
+                        }
+                    }
+                });
             }
         }
 
@@ -333,6 +419,7 @@ namespace LiteTube
             _lastVideoUrl = null;
             _lastAudioUrl = null;
             StopInternal();
+            _lastObservedState = 0;
         }
 
         private void StopInternal()
@@ -457,7 +544,7 @@ namespace LiteTube
             }
         }
 
-        private int _cachedVolume = 100;
+        private int _cachedVolume = 70;
 
         public int Volume
         {
@@ -469,14 +556,7 @@ namespace LiteTube
             {
                 _cachedVolume = Math.Max(0, Math.Min(100, value));
                 if (_cachedVolume > 0) _isMuted = false;
-                if (_mediaPlayer == IntPtr.Zero) return;
-                try
-                {
-                    libvlc_audio_set_mute(_mediaPlayer, _isMuted ? 1 : 0);
-                    int safeVolume = Math.Max(0, Math.Min(100, _isMuted ? 0 : _cachedVolume));
-                    libvlc_audio_set_volume(_mediaPlayer, safeVolume);
-                }
-                catch { }
+                ApplyVolumeToNative();
             }
         }
 
@@ -502,14 +582,7 @@ namespace LiteTube
             set
             {
                 _isMuted = value;
-                if (_mediaPlayer == IntPtr.Zero) return;
-                try
-                {
-                    libvlc_audio_set_mute(_mediaPlayer, _isMuted ? 1 : 0);
-                    int safeVolume = Math.Max(0, Math.Min(100, _isMuted ? 0 : (_cachedVolume > 0 ? _cachedVolume : 100)));
-                    libvlc_audio_set_volume(_mediaPlayer, safeVolume);
-                }
-                catch { }
+                ApplyVolumeToNative();
             }
         }
 
@@ -531,6 +604,11 @@ namespace LiteTube
         {
             if (_isDisposed) return;
             _isDisposed = true;
+            if (_stateMonitorTimer != null)
+            {
+                try { _stateMonitorTimer.Dispose(); } catch { }
+                _stateMonitorTimer = null;
+            }
             Stop();
             if (_mediaPlayer != IntPtr.Zero)
             {

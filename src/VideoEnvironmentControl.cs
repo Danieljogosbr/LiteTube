@@ -148,6 +148,7 @@ namespace LiteTube
         private List<TrackItem> _openedPlaylistVideos = new List<TrackItem>();
 
         private bool _isLoadingMore = false;
+        private bool _initialHomeLoaded = false;
 
         // Playback & Progressive Streaming State
         private TrackItem _currentVideo;
@@ -182,17 +183,14 @@ namespace LiteTube
             Font = new Font("Segoe UI", 9.5f, FontStyle.Regular);
             DoubleBuffered = true;
 
-            if (VideoProfile.Volume < 0.35) VideoProfile.Volume = 0.85;
-            VideoProfile.IsMuted = false;
-
             BuildUI();
             WireEvents();
             UpdateQualityButtons();
             UpdateVideoAudioUI();
-            var _ = SwitchToNavSectionAsync("home");
         }
 
-        public AudioProfile VideoProfile { get { return _config.VideoAudio; } }
+        public double VideoVolume { get { return _config.VideoVolume; } }
+        public bool IsVideoMuted { get { return _config.IsVideoMuted; } }
         public bool IsVideoPlaying { get { return _isPlaying || (_vlcPlayer != null && _vlcPlayer.IsPlaying); } }
         public TrackItem CurrentVideo { get { return _currentVideo; } }
         public bool IsFullscreen { get { return _isFullscreen; } }
@@ -2037,6 +2035,12 @@ namespace LiteTube
 
         public void ResumeFromBackground()
         {
+            if (!_initialHomeLoaded)
+            {
+                _initialHomeLoaded = true;
+                var _ = SwitchToNavSectionAsync("home");
+            }
+
             if (_watchPagePanel != null && _watchPagePanel.Visible)
             {
                 if (_relatedRowCards != null && _relatedRowCards.IsSuspended)
@@ -2075,6 +2079,7 @@ namespace LiteTube
 
         public void SetSearchResults(SearchResultPage page, string queryLabel)
         {
+            _initialHomeLoaded = true;
             if (_isFullscreen) ToggleFullscreen(false);
 
             _activeNavSection = "search";
@@ -2203,8 +2208,8 @@ namespace LiteTube
 
             _lblVideoTitle.Text = video.Title;
             _lblVideoChannel.Text = !string.IsNullOrEmpty(video.Artist) ? video.Artist : "Canal do YouTube";
-            _lblVideoSubInfo.Text = string.Format("Qualidade {0}p  •  Áudio Vídeo: {1}%",
-                _config.VideoQualityHeight, (int)Math.Round(VideoProfile.Volume * 100));
+            _lblVideoSubInfo.Text = string.Format("Qualidade {0}p  •  Volume: {1}%",
+                _config.VideoQualityHeight, (int)Math.Round(_config.VideoVolume * 100));
             _picWatchChannelAvatar.Invalidate();
 
             CenterLoadingOverlay();
@@ -2244,14 +2249,14 @@ namespace LiteTube
                 string codec = streamUrls.Length > 2 ? streamUrls[2] : "Direct";
 
                 EnsureVlcPlayer();
-                _vlcPlayer.PlayStream(vUrl, aUrl, video.DurationSeconds, 0.0);
                 ApplyVideoAudioSettings();
+                _vlcPlayer.PlayStream(vUrl, aUrl, video.DurationSeconds, 0.0);
 
                 _isPlaying = true;
                 UpdatePlayPauseButton();
                 _lblBufferBadge.Text = string.Format("▶ LibVLC Direct3D ({0})", codec);
-                _lblVideoSubInfo.Text = string.Format("Qualidade {0}p ({1})  •  Motor LibVLC Direct3D  •  Áudio Vídeo: {2}%",
-                    _config.VideoQualityHeight, codec, (int)Math.Round(VideoProfile.Volume * 100));
+                _lblVideoSubInfo.Text = string.Format("Qualidade {0}p ({1})  •  Motor LibVLC Direct3D  •  Volume: {2}%",
+                    _config.VideoQualityHeight, codec, (int)Math.Round(_config.VideoVolume * 100));
                 EmitStatus(string.Format("▶ Assistindo ({0}p • LibVLC): {1}", _config.VideoQualityHeight, video.Title));
 
                 if (_config.EnableSponsorBlock)
@@ -2909,10 +2914,10 @@ namespace LiteTube
             {
                 if (_vlcPlayer != null)
                 {
-                    _vlcPlayer.IsMuted = VideoProfile.IsMuted;
-                    int safeVolume = Math.Max(0, Math.Min(100, (int)Math.Round(VideoProfile.EffectiveVolume * 100.0)));
-                    _vlcPlayer.Volume = safeVolume;
-                    _vlcPlayer.SpeedRatio = (float)Math.Max(0.5, Math.Min(2.0, VideoProfile.PlaybackSpeed));
+                    _vlcPlayer.IsMuted = _config.IsVideoMuted;
+                    int targetVol = _config.IsVideoMuted ? 0 : (int)Math.Round(_config.VideoVolume * 100.0);
+                    targetVol = Math.Max(0, Math.Min(100, targetVol));
+                    _vlcPlayer.Volume = targetVol;
                 }
             }
             catch { }
@@ -2921,22 +2926,22 @@ namespace LiteTube
 
         public void ToggleVideoMute()
         {
-            VideoProfile.IsMuted = !VideoProfile.IsMuted;
+            _config.IsVideoMuted = !_config.IsVideoMuted;
             ApplyVideoAudioSettings();
             _config.Save();
-            EmitStatus(VideoProfile.IsMuted
-                ? "🎬 Áudio de Vídeo mutado (🔇)"
-                : string.Format("🎬 Volume de Vídeo: {0}%", (int)Math.Round(VideoProfile.Volume * 100)));
+            EmitStatus(_config.IsVideoMuted
+                ? "🎬 Áudio de vídeo mutado (🔇)"
+                : string.Format("🎬 Volume do Vídeo: {0}%", (int)Math.Round(_config.VideoVolume * 100)));
         }
 
         public void ChangeVideoVolumeBy(double delta)
         {
-            double v = Math.Max(0.0, Math.Min(1.0, Math.Round(VideoProfile.Volume + delta, 2)));
-            VideoProfile.Volume = v;
-            if (v > 0.0 && VideoProfile.IsMuted) VideoProfile.IsMuted = false;
+            double v = Math.Max(0.0, Math.Min(1.0, Math.Round(_config.VideoVolume + delta, 2)));
+            _config.VideoVolume = v;
+            if (v > 0.0 && _config.IsVideoMuted) _config.IsVideoMuted = false;
             ApplyVideoAudioSettings();
             _config.Save();
-            EmitStatus(string.Format("🎬 Volume de Vídeo: {0}% (Independente da Música)", (int)Math.Round(VideoProfile.Volume * 100)));
+            EmitStatus(string.Format("🎬 Volume do Vídeo: {0}%", (int)Math.Round(_config.VideoVolume * 100)));
         }
 
         private void OnVideoVolumeMouseWheel(object sender, MouseEventArgs e)
@@ -2949,9 +2954,10 @@ namespace LiteTube
             int padX = 5;
             int trackW = Math.Max(10, _vidVolCustomBar.Width - padX * 2);
             double ratio = Math.Max(0.0, Math.Min(1.0, (double)(mouseX - padX) / trackW));
-            VideoProfile.Volume = Math.Round(ratio, 2);
-            if (VideoProfile.Volume > 0 && VideoProfile.IsMuted) VideoProfile.IsMuted = false;
+            _config.VideoVolume = Math.Round(ratio, 2);
+            if (_config.VideoVolume > 0 && _config.IsVideoMuted) _config.IsVideoMuted = false;
             ApplyVideoAudioSettings();
+            _config.Save();
         }
 
         private void OnPaintVideoVolumeBar(object sender, PaintEventArgs e)
@@ -2963,8 +2969,8 @@ namespace LiteTube
 
             g.Clear(Color.FromArgb(15, 15, 15));
 
-            bool isMuted = VideoProfile.IsMuted;
-            double vol = isMuted ? 0.0 : Math.Max(0.0, Math.Min(1.0, VideoProfile.Volume));
+            bool isMuted = _config.IsVideoMuted;
+            double vol = isMuted ? 0.0 : Math.Max(0.0, Math.Min(1.0, _config.VideoVolume));
             bool isHover = _isHoveringVolBar || _isDraggingVolBar;
 
             int trackH = isHover ? 4 : 3;
@@ -2999,12 +3005,12 @@ namespace LiteTube
 
         public void UpdateVideoAudioUI()
         {
-            int pct = (int)Math.Round(VideoProfile.Volume * 100);
+            int pct = (int)Math.Round(_config.VideoVolume * 100);
             if (_btnVidMute != null)
             {
-                string icon = (VideoProfile.IsMuted || VideoProfile.Volume <= 0.01) ? "\uE198" : "\uE15D";
+                string icon = (_config.IsVideoMuted || _config.VideoVolume <= 0.01) ? "\uE198" : "\uE15D";
                 _btnVidMute.Text = icon;
-                _btnVidMute.ForeColor = VideoProfile.IsMuted ? Color.FromArgb(170, 170, 170) : Color.White;
+                _btnVidMute.ForeColor = _config.IsVideoMuted ? Color.FromArgb(170, 170, 170) : Color.White;
             }
             if (_vidVolCustomBar != null)
             {
@@ -3012,7 +3018,7 @@ namespace LiteTube
             }
             if (_currentVideo != null && _lblVideoSubInfo != null)
             {
-                _lblVideoSubInfo.Text = string.Format("Qualidade {0}p  •  Volume: {1}%",
+                _lblVideoSubInfo.Text = string.Format("Qualidade {0}p • Volume: {1}%",
                     _config.VideoQualityHeight, pct);
             }
         }
@@ -3032,7 +3038,7 @@ namespace LiteTube
 
                 var lblBanner = new Label
                 {
-                    Text = "Este perfil regula APENAS os Vídeos (o volume de Música permanece baixo e separado).",
+                    Text = "Este perfil regula exclusivamente o Volume de VÍDEOS (1:1 direto na saída de som).",
                     Font = new Font("Segoe UI", 8.5f, FontStyle.Italic),
                     ForeColor = AccentBlue,
                     Location = new Point(18, 12),
@@ -3053,7 +3059,7 @@ namespace LiteTube
                     Size = new Size(340, 32),
                     Minimum = 0,
                     Maximum = 100,
-                    Value = (int)Math.Round(VideoProfile.Volume * 100),
+                    Value = (int)Math.Round(_config.VideoVolume * 100),
                     TickFrequency = 10,
                     BackColor = BgPanel
                 };
@@ -3094,7 +3100,7 @@ namespace LiteTube
                     Size = new Size(438, 32),
                     Minimum = -100,
                     Maximum = 100,
-                    Value = (int)Math.Round(VideoProfile.Balance * 100),
+                    Value = 0,
                     TickFrequency = 25,
                     BackColor = BgPanel
                 };
@@ -3141,24 +3147,21 @@ namespace LiteTube
 
                 Action refreshLabels = () =>
                 {
-                    lblVolTitle.Text = string.Format("🎬 Volume dos Vídeos: {0}% (Saída Efetiva: {1}%)",
-                        (int)Math.Round(VideoProfile.Volume * 100), VideoProfile.EffectivePercent);
-                    btnMuteDlg.Text = VideoProfile.IsMuted ? "🔇 Mutado" : "🔊 Ativo";
-                    btnMuteDlg.BackColor = VideoProfile.IsMuted ? YouTubeRed : BgCard;
+                    lblVolTitle.Text = string.Format("🎬 Volume do Vídeo: {0}%",
+                        (int)Math.Round(_config.VideoVolume * 100));
+                    btnMuteDlg.Text = _config.IsVideoMuted ? "🔇 Mutado" : "🔊 Ativo";
+                    btnMuteDlg.BackColor = _config.IsVideoMuted ? YouTubeRed : BgCard;
 
-                    int ceilPct = (int)Math.Round(VideoProfile.MaxVolumeCeiling * 100);
-                    lblCeilingTitle.Text = string.Format("🛡️ Teto Máximo de Vídeos: {0}%", ceilPct);
-                    btnCeil50.BackColor = ceilPct == 50 ? AccentGreen : BgCard;
-                    btnCeil75.BackColor = ceilPct == 75 ? AccentGreen : BgCard;
-                    btnCeil100.BackColor = ceilPct == 100 ? AccentBlue : BgCard;
+                    lblCeilingTitle.Text = "🛡️ Escala 1:1 Linear: 0% a 100% (Sem Teto Artificial)";
+                    btnCeil50.BackColor = BgCard;
+                    btnCeil75.BackColor = BgCard;
+                    btnCeil100.BackColor = AccentBlue;
 
-                    int balPct = (int)Math.Round(VideoProfile.Balance * 100);
-                    lblBalanceTitle.Text = balPct == 0
-                        ? "🎧 Balanço de Vídeo: Centro (L 50% / R 50%)"
-                        : (balPct < 0 ? string.Format("🎧 Balanço de Vídeo: {0}% Esquerda (L)", Math.Abs(balPct)) : string.Format("🎧 Balanço de Vídeo: {0}% Direita (R)", balPct));
+                    lblBalanceTitle.Text = "🎧 Balanço: Centro (L 50% / R 50%)";
 
-                    lblSpeedTitle.Text = string.Format("⚡ Velocidade do Vídeo: {0:0.00}x", VideoProfile.PlaybackSpeed);
-                    int spd = (int)Math.Round(VideoProfile.PlaybackSpeed * 100);
+                    float currentSpeed = _vlcPlayer != null ? _vlcPlayer.SpeedRatio : 1.0f;
+                    lblSpeedTitle.Text = string.Format("⚡ Velocidade do Vídeo: {0:0.00}x", currentSpeed);
+                    int spd = (int)Math.Round(currentSpeed * 100);
                     btnSpd075.BackColor = spd == 75 ? AccentBlue : BgCard;
                     btnSpd100.BackColor = spd == 100 ? AccentBlue : BgCard;
                     btnSpd125.BackColor = spd == 125 ? AccentBlue : BgCard;
@@ -3166,26 +3169,31 @@ namespace LiteTube
                     btnSpd200.BackColor = spd == 200 ? AccentBlue : BgCard;
                 };
 
-                sliderVol.Scroll += (s, e) => { VideoProfile.Volume = sliderVol.Value / 100.0; if (VideoProfile.Volume > 0) VideoProfile.IsMuted = false; ApplyVideoAudioSettings(); refreshLabels(); };
+                sliderVol.Scroll += (s, e) => {
+                    _config.VideoVolume = sliderVol.Value / 100.0;
+                    if (_config.VideoVolume > 0) _config.IsVideoMuted = false;
+                    ApplyVideoAudioSettings();
+                    refreshLabels();
+                };
                 btnMuteDlg.Click += (s, e) => { ToggleVideoMute(); refreshLabels(); };
 
-                btnPre40.Click += (s, e) => { sliderVol.Value = 40; VideoProfile.Volume = 0.40; ApplyVideoAudioSettings(); refreshLabels(); };
-                btnPre70.Click += (s, e) => { sliderVol.Value = 70; VideoProfile.Volume = 0.70; ApplyVideoAudioSettings(); refreshLabels(); };
-                btnPre85.Click += (s, e) => { sliderVol.Value = 85; VideoProfile.Volume = 0.85; ApplyVideoAudioSettings(); refreshLabels(); };
-                btnPre100.Click += (s, e) => { sliderVol.Value = 100; VideoProfile.Volume = 1.00; ApplyVideoAudioSettings(); refreshLabels(); };
+                btnPre40.Click += (s, e) => { sliderVol.Value = 40; _config.VideoVolume = 0.40; if (_config.IsVideoMuted) _config.IsVideoMuted = false; ApplyVideoAudioSettings(); refreshLabels(); };
+                btnPre70.Click += (s, e) => { sliderVol.Value = 70; _config.VideoVolume = 0.70; if (_config.IsVideoMuted) _config.IsVideoMuted = false; ApplyVideoAudioSettings(); refreshLabels(); };
+                btnPre85.Click += (s, e) => { sliderVol.Value = 85; _config.VideoVolume = 0.85; if (_config.IsVideoMuted) _config.IsVideoMuted = false; ApplyVideoAudioSettings(); refreshLabels(); };
+                btnPre100.Click += (s, e) => { sliderVol.Value = 100; _config.VideoVolume = 1.00; if (_config.IsVideoMuted) _config.IsVideoMuted = false; ApplyVideoAudioSettings(); refreshLabels(); };
 
-                btnCeil50.Click += (s, e) => { VideoProfile.MaxVolumeCeiling = 0.50; ApplyVideoAudioSettings(); refreshLabels(); };
-                btnCeil75.Click += (s, e) => { VideoProfile.MaxVolumeCeiling = 0.75; ApplyVideoAudioSettings(); refreshLabels(); };
-                btnCeil100.Click += (s, e) => { VideoProfile.MaxVolumeCeiling = 1.00; ApplyVideoAudioSettings(); refreshLabels(); };
+                btnCeil50.Click += (s, e) => { refreshLabels(); };
+                btnCeil75.Click += (s, e) => { refreshLabels(); };
+                btnCeil100.Click += (s, e) => { refreshLabels(); };
 
-                sliderBalance.Scroll += (s, e) => { VideoProfile.Balance = sliderBalance.Value / 100.0; ApplyVideoAudioSettings(); refreshLabels(); };
-                btnCenterBalance.Click += (s, e) => { sliderBalance.Value = 0; VideoProfile.Balance = 0.0; ApplyVideoAudioSettings(); refreshLabels(); };
+                sliderBalance.Scroll += (s, e) => { refreshLabels(); };
+                btnCenterBalance.Click += (s, e) => { sliderBalance.Value = 0; refreshLabels(); };
 
-                btnSpd075.Click += (s, e) => { VideoProfile.PlaybackSpeed = 0.75; ApplyVideoAudioSettings(); refreshLabels(); };
-                btnSpd100.Click += (s, e) => { VideoProfile.PlaybackSpeed = 1.00; ApplyVideoAudioSettings(); refreshLabels(); };
-                btnSpd125.Click += (s, e) => { VideoProfile.PlaybackSpeed = 1.25; ApplyVideoAudioSettings(); refreshLabels(); };
-                btnSpd150.Click += (s, e) => { VideoProfile.PlaybackSpeed = 1.50; ApplyVideoAudioSettings(); refreshLabels(); };
-                btnSpd200.Click += (s, e) => { VideoProfile.PlaybackSpeed = 2.00; ApplyVideoAudioSettings(); refreshLabels(); };
+                btnSpd075.Click += (s, e) => { if (_vlcPlayer != null) _vlcPlayer.SpeedRatio = 0.75f; refreshLabels(); };
+                btnSpd100.Click += (s, e) => { if (_vlcPlayer != null) _vlcPlayer.SpeedRatio = 1.00f; refreshLabels(); };
+                btnSpd125.Click += (s, e) => { if (_vlcPlayer != null) _vlcPlayer.SpeedRatio = 1.25f; refreshLabels(); };
+                btnSpd150.Click += (s, e) => { if (_vlcPlayer != null) _vlcPlayer.SpeedRatio = 1.50f; refreshLabels(); };
+                btnSpd200.Click += (s, e) => { if (_vlcPlayer != null) _vlcPlayer.SpeedRatio = 2.00f; refreshLabels(); };
 
                 chkAutoPauseMusic.CheckedChanged += (s, e) => { _config.AutoPauseMusicWhenVideoPlays = chkAutoPauseMusic.Checked; };
 

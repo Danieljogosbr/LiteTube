@@ -74,7 +74,11 @@ namespace LiteTube
             _videoTotalLen = ParseContentLength(videoUrl, 500000000L);
             _audioTotalLen = ParseContentLength(audioUrl, 50000000L);
 
-            _videoIsWebm = videoUrl != null && (videoUrl.IndexOf("mime=video%2Fwebm", StringComparison.OrdinalIgnoreCase) >= 0 || videoUrl.IndexOf("mime=video/webm", StringComparison.OrdinalIgnoreCase) >= 0);
+            _videoIsWebm = videoUrl != null && (
+                videoUrl.IndexOf("mime=video%2Fwebm", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                videoUrl.IndexOf("mime=video/webm", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                videoUrl.IndexOf("mime=audio%2Fwebm", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                videoUrl.IndexOf("mime=audio/webm", StringComparison.OrdinalIgnoreCase) >= 0);
             _audioIsWebm = audioUrl != null && (audioUrl.IndexOf("mime=audio%2Fwebm", StringComparison.OrdinalIgnoreCase) >= 0 || audioUrl.IndexOf("mime=audio/webm", StringComparison.OrdinalIgnoreCase) >= 0);
 
             _listener = new TcpListener(IPAddress.Loopback, 0);
@@ -99,9 +103,14 @@ namespace LiteTube
         {
             try
             {
-                var t1 = Task.Run(() => EnsureHeaderCached(false));
-                var t2 = Task.Run(() => EnsureHeaderCached(true));
-                await Task.WhenAll(t1, t2);
+                var tasks = new List<Task>();
+                if (!string.IsNullOrEmpty(_videoUrl))
+                    tasks.Add(Task.Run(() => EnsureHeaderCached(false)));
+                if (!string.IsNullOrEmpty(_audioUrl) && !string.Equals(_videoUrl, _audioUrl, StringComparison.OrdinalIgnoreCase))
+                    tasks.Add(Task.Run(() => EnsureHeaderCached(true)));
+
+                if (tasks.Count > 0)
+                    await Task.WhenAll(tasks);
             }
             catch { }
         }
@@ -114,8 +123,10 @@ namespace LiteTube
                 lock (_aCacheLock)
                 {
                     if (_audioHeaderCache != null) return _audioHeaderCache;
+                    string aUrl = _audioUrl ?? _videoUrl;
+                    if (string.IsNullOrEmpty(aUrl)) return null;
                     long detLen;
-                    _audioHeaderCache = FetchRangeBytes(_audioUrl, 0, Math.Min(_audioTotalLen - 1, HeaderCacheSize - 1), out detLen);
+                    _audioHeaderCache = FetchRangeBytes(aUrl, 0, Math.Min(_audioTotalLen - 1, HeaderCacheSize - 1), out detLen);
                     if (detLen > 0) _audioTotalLen = detLen;
                     return _audioHeaderCache;
                 }
@@ -126,8 +137,10 @@ namespace LiteTube
                 lock (_vCacheLock)
                 {
                     if (_videoHeaderCache != null) return _videoHeaderCache;
+                    string vUrl = _videoUrl ?? _audioUrl;
+                    if (string.IsNullOrEmpty(vUrl)) return null;
                     long detLen;
-                    _videoHeaderCache = FetchRangeBytes(_videoUrl, 0, Math.Min(_videoTotalLen - 1, HeaderCacheSize - 1), out detLen);
+                    _videoHeaderCache = FetchRangeBytes(vUrl, 0, Math.Min(_videoTotalLen - 1, HeaderCacheSize - 1), out detLen);
                     if (detLen > 0) _videoTotalLen = detLen;
                     return _videoHeaderCache;
                 }
@@ -137,6 +150,7 @@ namespace LiteTube
         private static byte[] FetchRangeBytes(string url, long start, long end, out long detectedTotalLen)
         {
             detectedTotalLen = -1;
+            if (string.IsNullOrEmpty(url)) return null;
             try
             {
                 var req = (HttpWebRequest)WebRequest.Create(url);
@@ -216,8 +230,13 @@ namespace LiteTube
                         string req = Encoding.ASCII.GetString(reqBuf, 0, read);
                         bool isAudio = req.IndexOf("/audio", StringComparison.OrdinalIgnoreCase) >= 0;
                         bool isHead = req.StartsWith("HEAD", StringComparison.OrdinalIgnoreCase);
-                        string targetUrl = isAudio ? _audioUrl : _videoUrl;
-                        long totalLen = isAudio ? _audioTotalLen : _videoTotalLen;
+                        string targetUrl = isAudio ? (_audioUrl ?? _videoUrl) : (_videoUrl ?? _audioUrl);
+
+                        // Garante que o header e o tamanho real (_audioTotalLen / _videoTotalLen via Content-Range)
+                        // sejam populados ANTES de responder os cabeçalhos HTTP ao LibVLC, evitando erro HTTP 416.
+                        EnsureHeaderCached(isAudio);
+
+                        long totalLen = isAudio ? (_audioUrl != null ? _audioTotalLen : _videoTotalLen) : (_videoUrl != null ? _videoTotalLen : _audioTotalLen);
 
                         long startByte = 0;
                         long endByte = totalLen - 1;
@@ -236,7 +255,17 @@ namespace LiteTube
                             }
                         }
 
-                        string mime = isAudio ? (_audioIsWebm ? "audio/webm" : "audio/mp4") : (_videoIsWebm ? "video/webm" : "video/mp4");
+                        bool isAudioStream = isAudio || (targetUrl != null && (
+                            targetUrl.IndexOf("mime=audio", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            targetUrl.IndexOf("mime=audio%2F", StringComparison.OrdinalIgnoreCase) >= 0));
+
+                        bool isWebm = (targetUrl != null && (
+                            targetUrl.IndexOf("mime=video%2Fwebm", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            targetUrl.IndexOf("mime=video/webm", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            targetUrl.IndexOf("mime=audio%2Fwebm", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            targetUrl.IndexOf("mime=audio/webm", StringComparison.OrdinalIgnoreCase) >= 0));
+
+                        string mime = isAudioStream ? (isWebm ? "audio/webm" : "audio/mp4") : (isWebm ? "video/webm" : "video/mp4");
 
                         string respHeader;
                         if (hasRange)

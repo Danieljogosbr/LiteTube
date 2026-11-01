@@ -1,5 +1,7 @@
 using System;
+using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -9,6 +11,14 @@ namespace LiteTube
     internal static class Program
     {
         private static Mutex _singleInstanceMutex;
+
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+
+        private const int SW_RESTORE = 9;
 
         [STAThread]
         private static void Main()
@@ -29,13 +39,21 @@ namespace LiteTube
             _singleInstanceMutex = new Mutex(true, "LiteTube_SingleInstance_Mutex_v2", out createdNew);
             if (!createdNew)
             {
-                Logger.Warn("APP", "Instância duplicada detectada. Encerrando.");
-                MessageBox.Show(
-                    "O LiteTube já está aberto (verifique a bandeja do sistema perto do relógio)!",
-                    "LiteTube",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information
-                );
+                Logger.Warn("APP", "Instância duplicada detectada. Restaurando janela existente e encerrando.");
+                try
+                {
+                    Process current = Process.GetCurrentProcess();
+                    foreach (Process proc in Process.GetProcessesByName(current.ProcessName))
+                    {
+                        if (proc.Id != current.Id && proc.MainWindowHandle != IntPtr.Zero)
+                        {
+                            ShowWindowAsync(proc.MainWindowHandle, SW_RESTORE);
+                            SetForegroundWindow(proc.MainWindowHandle);
+                            break;
+                        }
+                    }
+                }
+                catch { }
                 return;
             }
 
