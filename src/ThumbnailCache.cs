@@ -69,9 +69,9 @@ namespace LiteTube
 
             try
             {
-                if (ServicePointManager.DefaultConnectionLimit < 20)
+                if (ServicePointManager.DefaultConnectionLimit < 32)
                 {
-                    ServicePointManager.DefaultConnectionLimit = 20;
+                    ServicePointManager.DefaultConnectionLimit = 32;
                 }
             }
             catch { }
@@ -110,6 +110,13 @@ namespace LiteTube
                 if (_memoryCache.TryGetValue(safeId, out cached))
                 {
                     TouchLruUnsafe(safeId);
+                    if (onLoadedCallback != null)
+                    {
+                        ThreadPool.QueueUserWorkItem(_ =>
+                        {
+                            try { onLoadedCallback(); } catch { }
+                        });
+                    }
                     return cached;
                 }
 
@@ -285,70 +292,48 @@ namespace LiteTube
             int maxAttempts = 2;
             for (int attempt = 1; attempt <= maxAttempts; attempt++)
             {
-                HttpWebRequest req = null;
                 try
                 {
-                    req = (HttpWebRequest)WebRequest.Create(url);
-                    req.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-                    req.Headers.Set(HttpRequestHeader.AcceptLanguage, "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7");
-                    req.Headers.Set(HttpRequestHeader.AcceptEncoding, "gzip, deflate");
-                    req.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
-                    req.Accept = "image/jpeg,image/png,image/*;q=0.8";
-                    req.Timeout = 8000;
-                    req.ReadWriteTimeout = 8000;
-                    req.KeepAlive = true;
-                    try { req.ServicePoint.ConnectionLimit = 20; } catch { }
-
-                    using (var resp = (HttpWebResponse)req.GetResponse())
+                    using (var resp = HttpPipeline.Client.GetAsync(url).GetAwaiter().GetResult())
                     {
-                        if (resp.StatusCode == HttpStatusCode.OK)
+                        if (resp.IsSuccessStatusCode)
                         {
-                            using (var stream = resp.GetResponseStream())
-                            using (var ms = new MemoryStream())
-                            {
-                                if (stream != null)
-                                {
-                                    stream.CopyTo(ms);
-                                    return ms.ToArray();
-                                }
-                            }
+                            return resp.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult();
                         }
-                    }
-                }
-                catch (WebException wex)
-                {
-                    var httpResp = wex.Response as HttpWebResponse;
-                    if (httpResp != null)
-                    {
-                        int statusCode = (int)httpResp.StatusCode;
+
+                        int statusCode = (int)resp.StatusCode;
                         if (statusCode == 429)
                         {
-                            string host = (req != null && req.RequestUri != null) ? req.RequestUri.Host : "i.ytimg.com";
-                            Logger.Warn("THUMB", string.Format("CDN ({0}) retornou HTTP 429 para '{1}'. Tentativa {2}/{3}.", host, safeId, attempt, maxAttempts));
+                            Logger.Warn("THUMB", string.Format("CDN retornou HTTP 429 para '{0}'. Tentativa {1}/{2}.", safeId, attempt, maxAttempts));
                             if (attempt < maxAttempts)
                             {
                                 Thread.Sleep(1200);
                                 continue;
                             }
                         }
-                        else if (statusCode == 404 && string.IsNullOrEmpty(customUrl) && url.Contains("mqdefault.jpg"))
+                        else if (statusCode == 404)
                         {
-                            url = "https://i.ytimg.com/vi/" + safeId + "/hqdefault.jpg";
-                            continue;
-                        }
-                        break;
-                    }
-                    else
-                    {
-                        if (attempt < maxAttempts)
-                        {
-                            Thread.Sleep(400);
-                            continue;
+                            if (!url.Contains("mqdefault.jpg") && !url.Contains("hqdefault.jpg"))
+                            {
+                                url = "https://i.ytimg.com/vi/" + safeId + "/mqdefault.jpg";
+                                continue;
+                            }
+                            else if (url.Contains("mqdefault.jpg"))
+                            {
+                                url = "https://i.ytimg.com/vi/" + safeId + "/hqdefault.jpg";
+                                continue;
+                            }
+                            break;
                         }
                     }
                 }
                 catch (Exception ex)
                 {
+                    if (attempt < maxAttempts)
+                    {
+                        Thread.Sleep(400);
+                        continue;
+                    }
                     Logger.Warn("THUMB", string.Format("Erro no download da miniatura {0}: {1}", safeId, ex.Message));
                     break;
                 }

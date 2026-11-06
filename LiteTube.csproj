@@ -1,98 +1,73 @@
-<?xml version="1.0" encoding="utf-8"?>
-<Project ToolsVersion="4.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <Configuration Condition=" '$(Configuration)' == '' ">Release</Configuration>
-    <Platform Condition=" '$(Platform)' == '' ">x64</Platform>
-    <ProjectGuid>{A1B2C3D4-E5F6-47A8-9B0C-1D2E3F4A5B6C}</ProjectGuid>
     <OutputType>WinExe</OutputType>
-    <AppDesignerFolder>Properties</AppDesignerFolder>
-    <RootNamespace>LiteTube</RootNamespace>
-    <AssemblyName>LiteTube</AssemblyName>
-    <!-- .NET Framework 4.8.1 com fallback para 4.8 -->
-    <TargetFrameworkVersion Condition=" '$(TargetFrameworkVersion)' == '' ">v4.8.1</TargetFrameworkVersion>
-    <FileAlignment>512</FileAlignment>
-    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
-    <ApplicationIcon>app.ico</ApplicationIcon>
+    <TargetFramework>net8.0-windows7.0</TargetFramework>
+    <SupportedOSPlatformVersion>7.0</SupportedOSPlatformVersion>
+    <TargetPlatformMinVersion>7.0</TargetPlatformMinVersion>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
     <PlatformTarget>x64</PlatformTarget>
-    <Prefer32Bit>false</Prefer32Bit>
-    <MSBuildWarningsAsMessages>MSB3644;$(MSBuildWarningsAsMessages)</MSBuildWarningsAsMessages>
-  </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|x64' ">
-    <OutputPath>bin\Debug\</OutputPath>
-    <DebugSymbols>true</DebugSymbols>
-    <DebugType>full</DebugType>
-    <Optimize>false</Optimize>
-    <DefineConstants>DEBUG;TRACE</DefineConstants>
-    <ErrorReport>prompt</ErrorReport>
-    <WarningLevel>4</WarningLevel>
-  </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|x64' ">
-    <OutputPath>.\</OutputPath>
-    <DebugType>pdbonly</DebugType>
-    <Optimize>true</Optimize>
-    <DefineConstants>TRACE</DefineConstants>
-    <ErrorReport>prompt</ErrorReport>
-    <WarningLevel>4</WarningLevel>
+    <Platforms>x64</Platforms>
+    <LangVersion>12.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+    <RollForward>LatestMajor</RollForward>
+    <AssemblyTitle>LiteTube</AssemblyTitle>
+    <Product>LiteTube</Product>
+    <Description>LiteTube - Player leve e moderno para YouTube e YouTube Music</Description>
+    <Company>LiteTube</Company>
+    <Copyright>Copyright © 2026</Copyright>
+    <Version>0.5.0</Version>
+    <AssemblyVersion>0.5.0.0</AssemblyVersion>
+    <FileVersion>0.5.0.0</FileVersion>
+    <InformationalVersion>0.5.0</InformationalVersion>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <EnableDefaultApplicationDefinition>false</EnableDefaultApplicationDefinition>
+    <EnableDefaultPageItems>false</EnableDefaultPageItems>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <DefaultItemExcludes>$(DefaultItemExcludes);backup\**;lib\**</DefaultItemExcludes>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <NoWarn>$(NoWarn);CA1416;WFAC010;CS8632;CS8600;CS8601;CS8602;CS8603;CS8604;CS8612;CS8618;CS8622;CS8625;CS8605;CS8629;CS0169;CS0414;CS0649;CS8609;CS8610;CS8619</NoWarn>
+
+    <!-- Otimizações de compilação e runtime -->
+    <TieredCompilation>true</TieredCompilation>
+    <TieredCompilationQuickJit>true</TieredCompilationQuickJit>
   </PropertyGroup>
 
-  <!-- Referências Nativas do .NET Framework 4.8.1 / WPF / WinForms -->
   <ItemGroup>
-    <Reference Include="System" />
-    <Reference Include="System.Core" />
-    <Reference Include="System.Data" />
-    <Reference Include="System.Drawing" />
-    <Reference Include="System.Windows.Forms" />
-    <Reference Include="System.Web.Extensions" />
-    <Reference Include="System.Xaml" />
-    <Reference Include="System.Xml" />
-    <Reference Include="System.Net.Http" />
-    <Reference Include="WindowsFormsIntegration" />
-    <Reference Include="PresentationCore" />
-    <Reference Include="PresentationFramework" />
-    <Reference Include="WindowsBase" />
+    <Compile Include="src\**\*.cs" />
   </ItemGroup>
 
-  <!-- Código-Fonte C# -->
   <ItemGroup>
-    <Compile Include="src\*.cs" />
+    <!-- FlyleafLib nativo para .NET Core/.NET 8 -->
+    <PackageReference Include="FlyleafLib" Version="3.7.55" />
   </ItemGroup>
 
-  <!-- Itens e Regras de Cópia para Pasta de Saída -->
   <ItemGroup>
     <Content Include="app.ico">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <None Include="App.config" />
-    <None Include="LiteTube.exe.config">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <Content Include="src\WpfMediaListControl.xaml">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-    <Content Include="libvlc.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-    <Content Include="libvlccore.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-    <Content Include="bin\yt-dlp.exe">
+    <Content Include="bin\yt-dlp.exe" Condition="Exists('bin\yt-dlp.exe')">
       <Link>bin\yt-dlp.exe</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <Content Include="bin\ffmpeg.exe">
-      <Link>bin\ffmpeg.exe</Link>
+    <Content Include="FFmpeg\**\*.*" Condition="Exists('FFmpeg')">
+      <Link>FFmpeg\%(RecursiveDir)%(FileName)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <Content Include="bin\ffprobe.exe">
-      <Link>bin\ffprobe.exe</Link>
+    <Content Include="Plugins\**\*.*" Condition="Exists('Plugins')">
+      <Link>Plugins\%(RecursiveDir)%(FileName)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <Content Include="plugins\**\*.*">
-      <Link>plugins\%(RecursiveDir)%(FileName)%(Extension)</Link>
+    <Content Include="src\*.xaml">
+      <Link>src\%(FileName)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="src\*.xaml">
+      <Link>%(FileName)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
-
-  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

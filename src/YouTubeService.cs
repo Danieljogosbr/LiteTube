@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -65,12 +66,15 @@ namespace LiteTube
                 if (onStatus != null) onStatus("Baixando motor de mídia (yt-dlp.exe)...");
                 if (!Directory.Exists(_binDir)) Directory.CreateDirectory(_binDir);
 
-                await Task.Run(() =>
+                await Task.Run(async () =>
                 {
-                    using (var client = new WebClient())
+                    using (var resp = await HttpPipeline.Client.GetAsync("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe").ConfigureAwait(false))
                     {
-                        client.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
-                        client.DownloadFile("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe", _ytDlpPath);
+                        resp.EnsureSuccessStatusCode();
+                        using (var fs = new FileStream(_ytDlpPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                        {
+                            await resp.Content.CopyToAsync(fs).ConfigureAwait(false);
+                        }
                     }
                 });
                 return File.Exists(_ytDlpPath);
@@ -146,12 +150,6 @@ namespace LiteTube
 
                 return page;
             });
-        }
-
-        public async Task<List<TrackItem>> SearchAsync(string query, string filterType, AppConfig config)
-        {
-            var page = await SearchPageAsync(query, filterType, config);
-            return page.Items;
         }
 
         /// <summary>
@@ -617,15 +615,12 @@ namespace LiteTube
 
         private string PostInnerTube(string url, string jsonPayload, AppConfig config = null, string referer = null)
         {
-            var req = (HttpWebRequest)WebRequest.Create(url);
-            req.Method = "POST";
-            req.ContentType = "application/json";
-            req.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-            req.Headers["X-YouTube-Client-Name"] = "1";
-            req.Headers["X-YouTube-Client-Version"] = "2.20240530.01.00";
-            req.Headers["Origin"] = "https://www.youtube.com";
-            req.Referer = !string.IsNullOrEmpty(referer) ? referer : "https://www.youtube.com/";
-            req.Timeout = 12000;
+            var headers = new Dictionary<string, string>
+            {
+                { "X-YouTube-Client-Name", "1" },
+                { "X-YouTube-Client-Version", "2.20240530.01.00" },
+                { "Origin", "https://www.youtube.com" }
+            };
 
             if (config != null && !string.IsNullOrEmpty(config.CookiesFilePath) && File.Exists(config.CookiesFilePath))
             {
@@ -634,24 +629,444 @@ namespace LiteTube
                     string cookieHeader = LoadCookieHeaderFromNetscapeFile(config.CookiesFilePath);
                     if (!string.IsNullOrEmpty(cookieHeader))
                     {
-                        req.Headers["Cookie"] = cookieHeader;
+                        headers["Cookie"] = cookieHeader;
                     }
                 }
                 catch { }
             }
 
-            byte[] bodyBytes = Encoding.UTF8.GetBytes(jsonPayload);
-            req.ContentLength = bodyBytes.Length;
+            string refUrl = !string.IsNullOrEmpty(referer) ? referer : "https://www.youtube.com/";
+            return HttpPipeline.PostJson(url, jsonPayload, refUrl, headers);
+        }
 
-            using (Stream reqStream = req.GetRequestStream())
+        private string PostInnerTubeMusic(string jsonPayload, AppConfig config = null, string endpointUrl = "https://music.youtube.com/youtubei/v1/browse?prettyPrint=false")
+        {
+            var headers = new Dictionary<string, string>
             {
-                reqStream.Write(bodyBytes, 0, bodyBytes.Length);
+                { "Origin", "https://music.youtube.com" },
+                { "X-YouTube-Client-Name", "67" },
+                { "X-YouTube-Client-Version", "1.20240530.01.00" },
+                { "X-Origin", "https://music.youtube.com" }
+            };
+
+            string cookieHeader = ResolveCookieHeaderForConfig(config);
+            if (!string.IsNullOrEmpty(cookieHeader))
+            {
+                headers["Cookie"] = cookieHeader;
+                string sapisidHash = BuildSapisidHashHeader(cookieHeader, "https://music.youtube.com");
+                if (!string.IsNullOrEmpty(sapisidHash))
+                {
+                    headers["Authorization"] = sapisidHash;
+                    headers["X-Goog-AuthUser"] = "0";
+                }
             }
 
-            using (var resp = (HttpWebResponse)req.GetResponse())
-            using (var reader = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+            return HttpPipeline.PostJson(endpointUrl, jsonPayload, "https://music.youtube.com/", headers);
+        }
+
+        private string ResolveCookieHeaderForConfig(AppConfig config)
+        {
+            if (config == null) return null;
+
+            try
             {
-                return reader.ReadToEnd();
+                if (!string.IsNullOrEmpty(config.CookiesFilePath) && File.Exists(config.CookiesFilePath))
+                {
+                    string h = LoadCookieHeaderFromNetscapeFile(config.CookiesFilePath);
+                    if (!string.IsNullOrEmpty(h)) return h;
+                }
+
+                string defaultCookiesFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "cookies.txt");
+                if (File.Exists(defaultCookiesFile) && new FileInfo(defaultCookiesFile).Length > 100)
+                {
+                    string h = LoadCookieHeaderFromNetscapeFile(defaultCookiesFile);
+                    if (!string.IsNullOrEmpty(h)) return h;
+                }
+
+                if (!string.IsNullOrEmpty(config.BrowserForCookies) && config.BrowserForCookies != "none" && File.Exists(_ytDlpPath))
+                {
+                    string tempCookiePath = Path.Combine(_cacheDir, "browser_session_cookies.txt");
+                    bool needsRefresh = !File.Exists(tempCookiePath) ||
+                                        new FileInfo(tempCookiePath).Length < 100 ||
+                                        (DateTime.UtcNow - File.GetLastWriteTimeUtc(tempCookiePath)).TotalMinutes > 20;
+
+                    if (needsRefresh)
+                    {
+                        string args = string.Format("--cookies-from-browser {0} --cookies \"{1}\" --skip-download --no-warnings \"https://music.youtube.com/\"",
+                            config.BrowserForCookies, tempCookiePath);
+                        RunYtDlpProcess(args, 10000);
+                        GoogleAuthDialog.SanitizeCookieFile(tempCookiePath);
+                    }
+
+                    if (File.Exists(tempCookiePath) && new FileInfo(tempCookiePath).Length > 100)
+                    {
+                        string h = LoadCookieHeaderFromNetscapeFile(tempCookiePath);
+                        if (!string.IsNullOrEmpty(h)) return h;
+                    }
+                }
+            }
+            catch { }
+
+            return null;
+        }
+
+        private static string BuildSapisidHashHeader(string cookieHeader, string origin)
+        {
+            if (string.IsNullOrEmpty(cookieHeader)) return null;
+            try
+            {
+                string sapisid = ExtractCookieValue(cookieHeader, "SAPISID");
+                if (string.IsNullOrEmpty(sapisid))
+                {
+                    sapisid = ExtractCookieValue(cookieHeader, "__Secure-3PAPISID");
+                }
+                if (string.IsNullOrEmpty(sapisid)) return null;
+
+                long ts = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+                string raw = string.Format("{0} {1} {2}", ts, sapisid, origin);
+                using (var sha1 = SHA1.Create())
+                {
+                    byte[] hashBytes = sha1.ComputeHash(Encoding.UTF8.GetBytes(raw));
+                    var sb = new StringBuilder(hashBytes.Length * 2);
+                    for (int i = 0; i < hashBytes.Length; i++)
+                    {
+                        sb.Append(hashBytes[i].ToString("x2"));
+                    }
+                    return string.Format("SAPISIDHASH {0}_{1}", ts, sb.ToString());
+                }
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static string ExtractCookieValue(string cookieHeader, string key)
+        {
+            if (string.IsNullOrEmpty(cookieHeader) || string.IsNullOrEmpty(key)) return null;
+            var m = Regex.Match(cookieHeader, "(?:^|;\\s*)" + Regex.Escape(key) + "=([^;]+)");
+            return m.Success ? m.Groups[1].Value.Trim() : null;
+        }
+
+        /// <summary>
+        /// Fetches the user's personalized YouTube Music feed ("FEmusic_home" via WEB_REMIX client),
+        /// parsing "musicCarouselShelfRenderer" shelves ("Ouvir novamente", "Seu Supermix", personalized carousels)
+        /// into TrackItem instances, with automatic fallback to music trends if cookies are absent or expired.
+        /// </summary>
+        public async Task<Tuple<List<TrackItem>, string>> FetchPersonalizedMusicFeedAsync(AppConfig config)
+        {
+            return await Task.Run(() =>
+            {
+                var list = new List<TrackItem>();
+                var seenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                bool usedFallback = false;
+
+                try
+                {
+                    string payload = "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\",\"clientVersion\":\"1.20240530.01.00\",\"hl\":\"pt\",\"gl\":\"BR\"}},\"browseId\":\"FEmusic_home\"}";
+                    string json = PostInnerTubeMusic(payload, config);
+
+                    if (!string.IsNullOrEmpty(json))
+                    {
+                        var parsed = ParseMusicCarouselShelves(json, seenIds);
+                        if (parsed.Count > 0)
+                        {
+                            list.AddRange(parsed);
+                        }
+                    }
+
+                    // Check if user had cookies or if response returned too few personalized tracks
+                    string cookieCheck = ResolveCookieHeaderForConfig(config);
+                    bool hasAuthSession = !string.IsNullOrEmpty(cookieCheck) &&
+                                          (cookieCheck.IndexOf("SAPISID", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                           cookieCheck.IndexOf("LOGIN_INFO", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                           cookieCheck.IndexOf("SSID", StringComparison.OrdinalIgnoreCase) >= 0);
+
+                    if (!hasAuthSession && list.Count < 8)
+                    {
+                        usedFallback = true;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn("YTMUSIC", "Erro ao buscar feed personalizado FEmusic_home: " + ex.Message);
+                    usedFallback = true;
+                }
+
+                // Fallback: se os cookies estiverem ausentes, a sessão expirar ou FEmusic_home retornar vazio, busca tendências musicais
+                if (list.Count == 0 || usedFallback)
+                {
+                    try
+                    {
+                        string explorePayload = "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\",\"clientVersion\":\"1.20240530.01.00\",\"hl\":\"pt\",\"gl\":\"BR\"}},\"browseId\":\"FEmusic_explore\"}";
+                        string exploreJson = PostInnerTubeMusic(explorePayload, config);
+                        var exploreTracks = ParseMusicCarouselShelves(exploreJson, seenIds);
+                        if (exploreTracks.Count > 0)
+                        {
+                            list.AddRange(exploreTracks);
+                            usedFallback = true;
+                        }
+                    }
+                    catch { }
+
+                    if (list.Count < 10)
+                    {
+                        try
+                        {
+                            string trendPayload = "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"2.20240530.01.00\",\"hl\":\"pt\",\"gl\":\"BR\"}},\"query\":\"top músicas mais tocadas brasil oficial audio\"}";
+                            string trendJson = PostInnerTube("https://www.youtube.com/youtubei/v1/search?prettyPrint=false", trendPayload, config);
+                            var trendPage = ParseInnerTubeSearchPage(trendJson, false, false);
+                            if (trendPage != null && trendPage.Items != null)
+                            {
+                                foreach (var t in trendPage.Items)
+                                {
+                                    if (t != null && !t.IsChannel && !t.IsPlaylistCard && seenIds.Add(t.Id))
+                                    {
+                                        list.Add(t);
+                                        if (list.Count >= 45) break;
+                                    }
+                                }
+                                usedFallback = true;
+                            }
+                        }
+                        catch { }
+                    }
+                }
+
+                string status = list.Count > 0
+                    ? (usedFallback ? "Tendências musicais carregadas (conecte os cookies para personalizar o Supermix)." : "OK")
+                    : "Não foi possível carregar o feed do YouTube Music.";
+
+                return Tuple.Create(list, status);
+            });
+        }
+
+        /// <summary>
+        /// Fetches official YouTube Music charts, top songs, and new releases using browseId "FEmusic_explore" via WEB_REMIX.
+        /// </summary>
+        public async Task<Tuple<List<TrackItem>, string>> FetchMusicExploreFeedAsync(AppConfig config)
+        {
+            return await Task.Run(() =>
+            {
+                var list = new List<TrackItem>();
+                var seenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                try
+                {
+                    string payload = "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\",\"clientVersion\":\"1.20240530.01.00\",\"hl\":\"pt\",\"gl\":\"BR\"}},\"browseId\":\"FEmusic_explore\"}";
+                    string json = PostInnerTubeMusic(payload, config);
+                    if (!string.IsNullOrEmpty(json))
+                    {
+                        var exploreItems = ParseMusicCarouselShelves(json, seenIds);
+                        if (exploreItems.Count > 0)
+                        {
+                            list.AddRange(exploreItems);
+                        }
+                    }
+
+                    // Also query FEmusic_charts if we want more official chart tracks
+                    if (list.Count < 15)
+                    {
+                        string chartsPayload = "{\"context\":{\"client\":{\"clientName\":\"WEB_REMIX\",\"clientVersion\":\"1.20240530.01.00\",\"hl\":\"pt\",\"gl\":\"BR\"}},\"browseId\":\"FEmusic_charts\"}";
+                        string chartsJson = PostInnerTubeMusic(chartsPayload, config);
+                        if (!string.IsNullOrEmpty(chartsJson))
+                        {
+                            var chartItems = ParseMusicCarouselShelves(chartsJson, seenIds);
+                            if (chartItems.Count > 0)
+                            {
+                                list.AddRange(chartItems);
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn("YTMUSIC", "Erro ao buscar FEmusic_explore: " + ex.Message);
+                }
+
+                // Fallback to YouTube Music official releases / charts search if FEmusic_explore returned fewer than 8 playable tracks
+                if (list.Count < 8)
+                {
+                    try
+                    {
+                        string searchPayload = "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"2.20240530.01.00\",\"hl\":\"pt\",\"gl\":\"BR\"}},\"query\":\"lançamentos musicais paradas youtube music oficial\"}";
+                        string searchJson = PostInnerTube("https://www.youtube.com/youtubei/v1/search?prettyPrint=false", searchPayload, config);
+                        var page = ParseInnerTubeSearchPage(searchJson, false, false);
+                        if (page != null && page.Items != null)
+                        {
+                            foreach (var t in page.Items)
+                            {
+                                if (t != null && !t.IsChannel && !t.IsPlaylistCard && seenIds.Add(t.Id))
+                                {
+                                    list.Add(t);
+                                    if (list.Count >= 45) break;
+                                }
+                            }
+                        }
+                    }
+                    catch { }
+                }
+
+                string status = list.Count > 0 ? "OK" : "Não foi possível carregar paradas e lançamentos do YouTube Music.";
+                return Tuple.Create(list, status);
+            });
+        }
+
+        public List<TrackItem> ParseMusicCarouselShelves(string json, HashSet<string> seenIds)
+        {
+            var results = new List<TrackItem>();
+            if (string.IsNullOrEmpty(json)) return results;
+            if (seenIds == null) seenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            try
+            {
+                string[] shelfBlocks = json.Split(new string[] { "\"musicCarouselShelfRenderer\":" }, StringSplitOptions.None);
+                for (int s = 1; s < shelfBlocks.Length; s++)
+                {
+                    string shelf = shelfBlocks[s];
+                    string shelfHeader = ExtractFieldText(shelf, "\"header\"", 800);
+                    if (!string.IsNullOrEmpty(shelfHeader))
+                    {
+                        shelfHeader = UnescapeJsonString(shelfHeader);
+                    }
+
+                    ParseMusicRendererBlocksFromSegment(shelf, shelfHeader, seenIds, results);
+                    if (results.Count >= 80) break;
+                }
+
+                if (results.Count < 10)
+                {
+                    ParseMusicRendererBlocksFromSegment(json, "", seenIds, results);
+                }
+            }
+            catch { }
+
+            return results;
+        }
+
+        private void ParseMusicRendererBlocksFromSegment(string segment, string shelfCategory, HashSet<string> seenIds, List<TrackItem> results)
+        {
+            if (string.IsNullOrEmpty(segment)) return;
+
+            // 1. Parse musicResponsiveListItemRenderer (tracks in "Ouvir novamente", "Escolhas rápidas", "Paradas")
+            string[] listItems = segment.Split(new string[] { "\"musicResponsiveListItemRenderer\":" }, StringSplitOptions.None);
+            for (int i = 1; i < listItems.Length; i++)
+            {
+                string block = listItems[i];
+                if (block.Length > 10000) block = block.Substring(0, 10000);
+
+                string videoId = ExtractRegex(block, "\"videoId\"\\s*:\\s*\"([a-zA-Z0-9_-]{11})\"");
+                if (string.IsNullOrEmpty(videoId) || seenIds.Contains(videoId)) continue;
+
+                // Extract flexColumns text runs
+                var textRuns = Regex.Matches(block, "\"text\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
+                string title = "";
+                string artist = "";
+                string duration = "";
+
+                for (int r = 0; r < textRuns.Count; r++)
+                {
+                    string val = UnescapeJsonString(textRuns[r].Groups[1].Value).Trim();
+                    if (string.IsNullOrEmpty(val) || val == "•" || val == " • " || val == "," || val == " & " || val == "E") continue;
+
+                    if (Regex.IsMatch(val, "^[0-9]{1,2}:[0-9]{2}(:[0-9]{2})?$"))
+                    {
+                        if (string.IsNullOrEmpty(duration)) duration = val;
+                        continue;
+                    }
+
+                    if (string.IsNullOrEmpty(title))
+                    {
+                        title = val;
+                    }
+                    else if (string.IsNullOrEmpty(artist) &&
+                             !val.Equals("Música", StringComparison.OrdinalIgnoreCase) &&
+                             !val.Equals("Vídeo", StringComparison.OrdinalIgnoreCase) &&
+                             !val.Equals("Song", StringComparison.OrdinalIgnoreCase) &&
+                             !val.Equals(title, StringComparison.OrdinalIgnoreCase))
+                    {
+                        artist = val;
+                    }
+                }
+
+                if (string.IsNullOrEmpty(title)) continue;
+                if (string.IsNullOrEmpty(artist))
+                {
+                    artist = !string.IsNullOrEmpty(shelfCategory) ? shelfCategory : "YouTube Music";
+                }
+                else if (!string.IsNullOrEmpty(shelfCategory) &&
+                         (shelfCategory.IndexOf("Supermix", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                          shelfCategory.IndexOf("Ouvir novamente", StringComparison.OrdinalIgnoreCase) >= 0))
+                {
+                    artist = artist + " • " + shelfCategory;
+                }
+
+                if (string.IsNullOrEmpty(duration)) duration = "MÚSICA";
+                int durSec = ParseDurationToSeconds(duration);
+
+                string thumbUrl = ExtractRegex(block, "\"url\"\\s*:\\s*\"(https://[^\"]+)\"");
+                if (!string.IsNullOrEmpty(thumbUrl)) thumbUrl = UnescapeJsonString(thumbUrl);
+
+                seenIds.Add(videoId);
+                results.Add(new TrackItem
+                {
+                    Id = videoId,
+                    Title = title,
+                    Artist = artist.Replace(" - Topic", ""),
+                    Duration = duration,
+                    DurationSeconds = durSec,
+                    CustomThumbUrl = thumbUrl,
+                    ItemType = "video"
+                });
+
+                if (results.Count >= 80) return;
+            }
+
+            // 2. Parse musicTwoRowItemRenderer (cards in "Ouvir novamente", "Seu Supermix", "Novos lançamentos", carousels)
+            string[] twoRowItems = segment.Split(new string[] { "\"musicTwoRowItemRenderer\":" }, StringSplitOptions.None);
+            for (int i = 1; i < twoRowItems.Length; i++)
+            {
+                string block = twoRowItems[i];
+                if (block.Length > 10000) block = block.Substring(0, 10000);
+
+                string videoId = ExtractRegex(block, "\"videoId\"\\s*:\\s*\"([a-zA-Z0-9_-]{11})\"");
+                string playlistId = ExtractRegex(block, "\"playlistId\"\\s*:\\s*\"([a-zA-Z0-9_-]+)\"");
+
+                string title = ExtractFieldText(block, "\"title\"", 600);
+                if (string.IsNullOrEmpty(title)) continue;
+                title = UnescapeJsonString(title).Trim();
+
+                string subtitle = ExtractFieldText(block, "\"subtitle\"", 700);
+                if (!string.IsNullOrEmpty(subtitle)) subtitle = UnescapeJsonString(subtitle).Trim();
+                if (string.IsNullOrEmpty(subtitle))
+                {
+                    subtitle = !string.IsNullOrEmpty(shelfCategory) ? shelfCategory : "YouTube Music";
+                }
+                else if (!string.IsNullOrEmpty(shelfCategory) && subtitle.IndexOf(shelfCategory, StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    subtitle = subtitle + " • " + shelfCategory;
+                }
+
+                string thumbUrl = ExtractRegex(block, "\"url\"\\s*:\\s*\"(https://[^\"]+)\"");
+                if (!string.IsNullOrEmpty(thumbUrl)) thumbUrl = UnescapeJsonString(thumbUrl);
+
+                if (!string.IsNullOrEmpty(videoId) && !seenIds.Contains(videoId))
+                {
+                    seenIds.Add(videoId);
+                    results.Add(new TrackItem
+                    {
+                        Id = videoId,
+                        PlaylistId = playlistId ?? "",
+                        Title = title,
+                        Artist = subtitle.Replace(" - Topic", ""),
+                        Duration = "MÚSICA",
+                        DurationSeconds = 0,
+                        CustomThumbUrl = thumbUrl,
+                        ItemType = "video"
+                    });
+                }
+
+                if (results.Count >= 80) return;
             }
         }
 
@@ -875,6 +1290,15 @@ namespace LiteTube
                     if (string.IsNullOrEmpty(artist)) artist = "YouTube";
 
                     string channelId = ExtractRegex(block, "\"browseId\"\\s*:\\s*\"(UC[a-zA-Z0-9_-]+)\"");
+                    string thumbUrl = ExtractRegex(block, "\"url\"\\s*:\\s*\"((?:https?:)?//[^\"]*?ytimg\\.com/[^\"]+)\"");
+                    if (string.IsNullOrEmpty(thumbUrl))
+                    {
+                        thumbUrl = ExtractRegex(block, "\"url\"\\s*:\\s*\"((?:https?:)?//[^\"]*?ggpht\\.com/[^\"]+)\"");
+                    }
+                    if (!string.IsNullOrEmpty(thumbUrl) && thumbUrl.StartsWith("//"))
+                    {
+                        thumbUrl = "https:" + thumbUrl;
+                    }
 
                     title = UnescapeJsonString(title);
                     artist = UnescapeJsonString(artist).Replace(" - Topic", "");
@@ -892,6 +1316,7 @@ namespace LiteTube
                         Duration = duration,
                         DurationSeconds = durationSec,
                         ChannelId = channelId,
+                        CustomThumbUrl = thumbUrl,
                         ItemType = "video",
                         IsAlbum = !isVideoMode && durationSec >= 1200
                     });
@@ -1479,36 +1904,6 @@ namespace LiteTube
             catch { }
         }
 
-        private bool DownloadWithFfmpeg(string sourceUrl, string outputFile, int timeoutMs)
-        {
-            try
-            {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = _ffmpegPath,
-                    Arguments = string.Format("-y -loglevel error -i \"{0}\" -c copy -movflags +faststart \"{1}\"", sourceUrl, outputFile),
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardError = false,
-                    RedirectStandardOutput = false
-                };
-                using (var proc = Process.Start(psi))
-                {
-                    if (proc == null) return false;
-                    if (!proc.WaitForExit(timeoutMs))
-                    {
-                        try { proc.Kill(); } catch { }
-                        return false;
-                    }
-                    return proc.ExitCode == 0;
-                }
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
         /// <summary>
         /// Resolves a playable local cache file (.m4a) for the Music Environment.
         /// Uses ultra-fast VisionOS direct URL extraction (~2s) and unthrottled ffmpeg download (~250ms),
@@ -1613,7 +2008,7 @@ namespace LiteTube
                     directUrl = RunYtDlpFastUrl(string.Format("--no-playlist --extractor-args \"youtube:player_client=visionos;player_skip=hls\" -f \"{0}\" -g \"{1}\"", formatSelector, videoUrl), 8000);
                 }
 
-                // If directUrl resolved, return directly for instant zero-disk streaming via LibVLC & loopback proxy!
+                // If directUrl resolved, return directly for instant zero-disk streaming!
                 if (!string.IsNullOrEmpty(directUrl))
                 {
                     Logger.Info("MUSIC", string.Format("Stream direto resolvido com sucesso para Id={0} ('{1}')", track.Id, track.Title));

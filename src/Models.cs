@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Web.Script.Serialization;
+using System.Text.Json;
 
 namespace LiteTube
 {
@@ -27,6 +27,15 @@ namespace LiteTube
         public string ItemType { get; set; }
         public string ChannelId { get; set; }
         public string CustomThumbUrl { get; set; }
+        public string ThumbnailUrl
+        {
+            get
+            {
+                if (!string.IsNullOrEmpty(CustomThumbUrl)) return CustomThumbUrl;
+                if (!string.IsNullOrEmpty(Id)) return "https://i.ytimg.com/vi/" + Id + "/mqdefault.jpg";
+                return "";
+            }
+        }
         public string SubscriberCountText { get; set; }
         public string VideoCountText { get; set; }
 
@@ -169,7 +178,6 @@ namespace LiteTube
         public int Repeat { get; set; }
         public bool Shuffle { get; set; }
         public bool MinimizeToTrayOnClose { get; set; }
-        public bool AlwaysOnTopMiniPlayer { get; set; }
         public bool EnableGlobalHotkeys { get; set; }
 
         // ReVanced Features
@@ -199,7 +207,6 @@ namespace LiteTube
             Repeat = (int)RepeatMode.None;
             Shuffle = false;
             MinimizeToTrayOnClose = true;
-            AlwaysOnTopMiniPlayer = true;
             EnableGlobalHotkeys = true;
 
             HideShorts = true;
@@ -239,8 +246,12 @@ namespace LiteTube
                         json = File.ReadAllText(tempPath);
                     }
 
-                    var serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
-                    var cfg = serializer.Deserialize<AppConfig>(json);
+                    var jsonOptions = new JsonSerializerOptions
+                    {
+                        PropertyNameCaseInsensitive = true,
+                        WriteIndented = true
+                    };
+                    var cfg = JsonSerializer.Deserialize<AppConfig>(json, jsonOptions);
                     if (cfg != null)
                     {
                         if (cfg.Favorites == null) cfg.Favorites = new List<TrackItem>();
@@ -301,8 +312,12 @@ namespace LiteTube
                 {
                     string path = GetConfigPath();
                     string tempPath = path + ".tmp";
-                    var serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
-                    string json = serializer.Serialize(this);
+                    var jsonOptions = new JsonSerializerOptions
+                    {
+                        PropertyNameCaseInsensitive = true,
+                        WriteIndented = true
+                    };
+                    string json = JsonSerializer.Serialize(this, jsonOptions);
                     File.WriteAllText(tempPath, json);
                     if (File.Exists(path))
                     {

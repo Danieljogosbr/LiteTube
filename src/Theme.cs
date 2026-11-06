@@ -17,7 +17,6 @@ namespace LiteTube
         public static readonly Color SurfaceHigh = Color.FromArgb(28, 28, 28);    // Elementos elevados / cards (#1C1C1C)
         public static readonly Color Border = Color.FromArgb(44, 44, 44);         // Bordas sutis neutras (#2C2C2C)
         public static readonly Color Accent = Color.FromArgb(255, 30, 60);         // Vermelho YouTube Carmesim (#FF1E3C)
-        public static readonly Color AccentSoft = Color.FromArgb(255, 90, 115);
         public static readonly Color Blue = Color.FromArgb(62, 166, 255);          // Azul links YouTube (#3EA6FF)
         public static readonly Color TextMain = Color.FromArgb(245, 245, 245);    // Branco limpo de alto contraste
         public static readonly Color TextDim = Color.FromArgb(160, 160, 160);     // Cinza secundário neutro
@@ -47,90 +46,6 @@ namespace LiteTube
                 (int)(a.R + (b.R - a.R) * t),
                 (int)(a.G + (b.G - a.G) * t),
                 (int)(a.B + (b.B - a.B) * t));
-        }
-
-        /// <summary>Desenha o controle de volume em cápsula moderna com trilha suave e texto 100% legível.</summary>
-        public static void DrawModernVolumeBar(Graphics g, Rectangle bounds, double volume, bool isMuted, bool isCeilingActive, Color accentColor, bool isDragging, bool isHovering, string prefix)
-        {
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
-
-            // 1. Cápsula externa em preto/grafite neutro
-            int capRadius = Math.Min(bounds.Height / 2, 14);
-            using (var capPath = RoundRect(new Rectangle(bounds.X, bounds.Y, bounds.Width - 1, bounds.Height - 1), capRadius))
-            using (var capBrush = new SolidBrush(Color.FromArgb(22, 22, 22)))
-            using (var borderPen = new Pen((isDragging || isHovering) ? Blend(Border, Color.White, 0.35f) : Border))
-            {
-                g.FillPath(capBrush, capPath);
-                g.DrawPath(borderPen, capPath);
-            }
-
-            int padX = 10;
-            int trackW = Math.Max(10, bounds.Width - padX * 2);
-
-            // 2. Rótulos limpos: Prefixo à esquerda ("Vídeo" / "Música") e Porcentagem à direita ("80%" / "MUDO")
-            int pct = (int)Math.Round(Math.Max(0.0, Math.Min(1.0, volume)) * 100.0);
-            string valText = isMuted ? "MUDO" : (pct + "%");
-            Color valColor = isMuted ? TextDim : (isDragging ? TextMain : Blend(TextMain, TextDim, 0.2f));
-
-            using (var f = new Font("Segoe UI Semibold", 7.8f, FontStyle.Bold))
-            {
-                Rectangle labelRect = new Rectangle(bounds.X + padX, bounds.Y + 2, trackW, 14);
-
-                if (!string.IsNullOrEmpty(prefix))
-                {
-                    TextRenderer.DrawText(g, prefix, f, labelRect, TextDim,
-                        TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
-                }
-
-                TextRenderer.DrawText(g, valText, f, labelRect, valColor,
-                    TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
-            }
-
-            // 3. Trilha horizontal arredondada
-            int trackH = 4;
-            int trackY = bounds.Y + 19;
-            Rectangle trackRect = new Rectangle(bounds.X + padX, trackY, trackW, trackH);
-            using (var tp = RoundRect(trackRect, 2))
-            using (var tb = new SolidBrush(Color.FromArgb(45, 45, 45)))
-            {
-                g.FillPath(tb, tp);
-            }
-
-            // 4. Preenchimento ativo com gradiente suave
-            double effectiveVol = isMuted ? 0.0 : Math.Max(0.0, Math.Min(1.0, volume));
-            int fillW = (int)Math.Round(effectiveVol * trackW);
-            Color barColor = isMuted ? Color.FromArgb(90, 90, 90) : (isCeilingActive ? Color.FromArgb(46, 204, 113) : accentColor);
-
-            if (fillW > 1)
-            {
-                Rectangle fillRect = new Rectangle(bounds.X + padX, trackY, fillW, trackH);
-                using (var fp = RoundRect(fillRect, 2))
-                using (var fb = new LinearGradientBrush(fillRect, barColor, Blend(barColor, Color.White, 0.25f), 0f))
-                {
-                    g.FillPath(fb, fp);
-                }
-            }
-
-            // 5. Scrubber thumb knob com halo suave
-            if (!isMuted)
-            {
-                int cx = bounds.X + padX + fillW;
-                int cy = trackY + trackH / 2;
-                int halo = isDragging ? 14 : (isHovering ? 10 : 0);
-                if (halo > 0)
-                {
-                    using (var hb = new SolidBrush(Color.FromArgb(isDragging ? 70 : 40, barColor)))
-                    {
-                        g.FillEllipse(hb, cx - halo / 2, cy - halo / 2, halo, halo);
-                    }
-                }
-                int knob = isDragging ? 10 : 8;
-                using (var kb = new SolidBrush(Color.White))
-                {
-                    g.FillEllipse(kb, cx - knob / 2, cy - knob / 2, knob, knob);
-                }
-            }
         }
     }
 

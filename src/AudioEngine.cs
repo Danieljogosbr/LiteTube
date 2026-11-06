@@ -3,18 +3,20 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using FlyleafLib;
+using FlyleafLib.MediaPlayer;
 
 namespace LiteTube
 {
     /// <summary>
-    /// Motor de áudio dedicado ao Ambiente de Música (🎵 Ambiente Música) baseado na classe VlcPlayer em modo Headless.
-    /// Elimina duplicações de chamadas P/Invoke e reproduz fluxos de áudio Opus/AAC diretamente via HTTPS sem intermediários.
-    /// Utiliza _config.MusicAudio exclusivamente para manter o volume de música independente do vídeo.
+    /// Motor de áudio dedicado ao Ambiente de Música (🎵 Ambiente Música) baseado no FlyleafLib / FFmpeg nativo em modo Headless.
+    /// Elimina intermediários de rede e reproduz fluxos Opus/AAC diretamente via HTTPS sem perda de pacotes ou engasgos.
+    /// Utiliza _config.MusicVolume exclusivamente para manter o volume de música independente do vídeo.
     /// </summary>
     public class AudioEngine : IDisposable
     {
-        private VlcPlayer _player;
-        private LocalRangeUnthrottlerProxy _rangeProxy = null;
+        private Player _player;
+        private Config _playerConfig;
         private readonly YouTubeService _ytService;
         private readonly AppConfig _config;
         private readonly List<TrackItem> _queue;
@@ -30,12 +32,20 @@ namespace LiteTube
         private DateTime _playStartUtc = DateTime.MinValue;
         private int _consecutiveInstantEnds = 0;
         private int _consecutiveFailures = 0;
+        private List<SponsorSegment> _currentOfftopicSegments = new List<SponsorSegment>();
+        private string _lastSkippedOfftopicUuid = "";
 
         public event Action<TrackItem> TrackChanged;
         public event Action<bool, bool> PlaybackStateChanged; // (isPlaying, isLoading)
         public event Action<string> StatusMessage;
         public event Action QueueUpdated;
         public event Action AudioSettingsChanged;
+        public event Action<List<SponsorSegment>> OfftopicSegmentsLoaded;
+
+        public List<SponsorSegment> CurrentOfftopicSegments
+        {
+            get { return _currentOfftopicSegments; }
+        }
 
         public AudioEngine(YouTubeService ytService, AppConfig config)
         {
@@ -45,10 +55,7 @@ namespace LiteTube
             _rng = new Random();
             _syncContext = SynchronizationContext.Current;
 
-            // Player LibVLC Headless é instanciado apenas sob demanda (lazy init) ao tocar a primeira música,
-            // evitando travar a inicialização da UI enquanto o LibVLC escaneia plugins no disco.
-
-            // Monitor de segurança periódico para detecção de término
+            // Monitor de segurança periódico para detecção de término e SponsorBlock
             _stateMonitorTimer = new System.Threading.Timer(OnStateMonitorTick, null, 250, 250);
         }
 
@@ -56,8 +63,28 @@ namespace LiteTube
         {
             if (_player == null)
             {
-                _player = new VlcPlayer(IntPtr.Zero);
-                _player.OnEndReached += () => SafeDispatch(OnMediaEnded);
+                _playerConfig = new Config();
+                _playerConfig.Video.Enabled = false; // Modo headless de áudio puro
+                _playerConfig.Player.SeekAccurate = true;
+                _playerConfig.Player.AutoPlay = true;
+
+                string ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+                _playerConfig.Demuxer.FormatOpt["user_agent"] = ua;
+                _playerConfig.Demuxer.FormatOpt["headers"] = "User-Agent: " + ua + "\r\n";
+                _playerConfig.Demuxer.AudioFormatOpt["user_agent"] = ua;
+                _playerConfig.Demuxer.AudioFormatOpt["headers"] = "User-Agent: " + ua + "\r\n";
+                _playerConfig.Demuxer.FormatOpt["reconnect"] = "1";
+                _playerConfig.Demuxer.FormatOpt["reconnect_streamed"] = "1";
+                _playerConfig.Demuxer.FormatOpt["reconnect_delay_max"] = "5";
+
+                _player = new Player(_playerConfig);
+                _player.PlaybackStopped += (s, e) =>
+                {
+                    if (_player != null && _player.Status == FlyleafLib.MediaPlayer.Status.Ended)
+                    {
+                        SafeDispatch(OnMediaEnded);
+                    }
+                };
                 ApplyAudioSettingsToPlayer();
             }
         }
@@ -88,11 +115,6 @@ namespace LiteTube
                 {
                     _config.IsMusicMuted = false;
                 }
-                if (_player != null)
-                {
-                    _player.IsMuted = _config.IsMusicMuted;
-                    _player.Volume = _config.IsMusicMuted ? 0 : (int)Math.Round(_config.MusicVolume * 100.0);
-                }
                 ApplyAudioSettingsToPlayer();
             }
         }
@@ -103,11 +125,6 @@ namespace LiteTube
             set
             {
                 _config.IsMusicMuted = value;
-                if (_player != null)
-                {
-                    _player.IsMuted = value;
-                    _player.Volume = value ? 0 : (int)Math.Round(_config.MusicVolume * 100.0);
-                }
                 ApplyAudioSettingsToPlayer();
             }
         }
@@ -126,12 +143,12 @@ namespace LiteTube
 
         public double PlaybackSpeed
         {
-            get { return _player != null ? _player.SpeedRatio : 1.0; }
+            get { return _player != null ? _player.Speed : 1.0; }
             set
             {
                 if (_player != null)
                 {
-                    _player.SpeedRatio = (float)Math.Max(0.5, Math.Min(2.0, value));
+                    _player.Speed = Math.Max(0.5, Math.Min(2.0, value));
                 }
             }
         }
@@ -176,12 +193,12 @@ namespace LiteTube
 
         public void ApplyAudioSettingsToPlayer()
         {
-            if (_player != null)
+            if (_player != null && _player.Audio != null)
             {
                 try
                 {
-                    _player.IsMuted = _config.IsMusicMuted;
-                    _player.Volume = _config.IsMusicMuted ? 0 : (int)Math.Round(_config.MusicVolume * 100.0);
+                    _player.Audio.Mute = _config.IsMusicMuted;
+                    _player.Audio.Volume = _config.IsMusicMuted ? 0 : (int)Math.Round(_config.MusicVolume * 100.0);
                 }
                 catch { }
             }
@@ -196,7 +213,11 @@ namespace LiteTube
         {
             get
             {
-                return _player != null ? _player.CurrentTimeSeconds : 0.0;
+                if (_player != null && _player.CurTime > 0)
+                {
+                    return TimeSpan.FromTicks(_player.CurTime).TotalSeconds;
+                }
+                return 0.0;
             }
         }
 
@@ -204,9 +225,9 @@ namespace LiteTube
         {
             get
             {
-                if (_player != null && _player.DurationSeconds > 0)
+                if (_player != null && _player.Duration > 0)
                 {
-                    return _player.DurationSeconds;
+                    return TimeSpan.FromTicks(_player.Duration).TotalSeconds;
                 }
                 if (CurrentTrack != null && CurrentTrack.DurationSeconds > 0)
                 {
@@ -250,7 +271,7 @@ namespace LiteTube
                 {
                     seconds = Math.Max(0.0, seconds);
                 }
-                _player.Seek(seconds);
+                _player.SeekAccurate((int)Math.Round(seconds * 1000.0));
             }
             catch { }
         }
@@ -342,6 +363,10 @@ namespace LiteTube
 
             StopCurrentPlaybackInternal();
 
+            _currentOfftopicSegments = new List<SponsorSegment>();
+            _lastSkippedOfftopicUuid = "";
+            if (OfftopicSegmentsLoaded != null) SafeDispatch(delegate { OfftopicSegmentsLoaded(_currentOfftopicSegments); });
+
             _isPlaying = false;
             _isLoading = true;
             if (TrackChanged != null) SafeDispatch(delegate { TrackChanged(track); });
@@ -349,6 +374,39 @@ namespace LiteTube
             if (QueueUpdated != null) SafeDispatch(QueueUpdated);
 
             EmitStatus("🎵 Carregando música: " + track.Title + "...");
+
+            if (_config.EnableSponsorBlock && !string.IsNullOrEmpty(track.Id))
+            {
+                string targetTrackId = track.Id;
+                var _ = Task.Run(async () =>
+                {
+                    var segs = await SponsorBlockService.GetMusicSegmentsAsync(targetTrackId);
+                    if (!token.IsCancellationRequested && CurrentTrack != null && CurrentTrack.Id == targetTrackId)
+                    {
+                        _currentOfftopicSegments = segs ?? new List<SponsorSegment>();
+                        if (OfftopicSegmentsLoaded != null) SafeDispatch(delegate { OfftopicSegmentsLoaded(_currentOfftopicSegments); });
+
+                        // Se o videoclipe iniciar com introdução/diálogo não-musical no início, pula imediatamente
+                        if (_config.AutoSkipSponsors && _isPlaying && _player != null)
+                        {
+                            double skipTo;
+                            SponsorSegment matched;
+                            if (SponsorBlockService.CheckAndGetSkipTarget(CurrentPositionSeconds, _currentOfftopicSegments, out skipTo, out matched))
+                            {
+                                if (matched != null && _lastSkippedOfftopicUuid != matched.UUID)
+                                {
+                                    _lastSkippedOfftopicUuid = matched.UUID;
+                                    SafeDispatch(delegate
+                                    {
+                                        SeekToSeconds(skipTo);
+                                        EmitStatus(string.Format("⏩ [SponsorBlock] Trecho não-musical pulado ({0:0.0}s -> {1:0.0}s)", matched.Start, matched.End));
+                                    });
+                                }
+                            }
+                        }
+                    }
+                });
+            }
 
             string source = await _ytService.GetPlayableSourceAsync(track, _config, token);
             if (token.IsCancellationRequested) return;
@@ -376,27 +434,9 @@ namespace LiteTube
             {
                 EnsurePlayerCreated();
 
-                string playMrl;
-                if (source.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
-                    source.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-                {
-                    if (_rangeProxy != null)
-                    {
-                        try { _rangeProxy.Dispose(); } catch { }
-                        _rangeProxy = null;
-                    }
-                    _rangeProxy = new LocalRangeUnthrottlerProxy(null, source);
-                    await _rangeProxy.PrewarmHeadersAsync();
-                    playMrl = _rangeProxy.AudioLoopbackUrl;
-                }
-                else
-                {
-                    playMrl = Path.GetFullPath(source);
-                }
-
-                _player.IsMuted = _config.IsMusicMuted;
-                _player.Volume = _config.IsMusicMuted ? 0 : (int)Math.Round(_config.MusicVolume * 100.0);
-                _player.PlayStream(playMrl, null, track.DurationSeconds, 0);
+                ApplyAudioSettingsToPlayer();
+                _player.Stop();
+                _player.OpenAsync(source);
                 _playStartUtc = DateTime.UtcNow;
 
                 _consecutiveFailures = 0;
@@ -492,11 +532,6 @@ namespace LiteTube
 
         private void StopCurrentPlaybackInternal()
         {
-            if (_rangeProxy != null)
-            {
-                try { _rangeProxy.Dispose(); } catch { }
-                _rangeProxy = null;
-            }
             if (_player != null)
             {
                 try { _player.Stop(); } catch { }
@@ -570,10 +605,31 @@ namespace LiteTube
 
             try
             {
-                if (_isPlaying && _player.HasEnded)
+                if (_isPlaying && _player.Status == FlyleafLib.MediaPlayer.Status.Ended)
                 {
                     _isPlaying = false;
                     SafeDispatch(OnMediaEnded);
+                    return;
+                }
+
+                if (_isPlaying && _config.EnableSponsorBlock && _config.AutoSkipSponsors &&
+                    _currentOfftopicSegments != null && _currentOfftopicSegments.Count > 0)
+                {
+                    double cur = CurrentPositionSeconds;
+                    double skipTo;
+                    SponsorSegment matched;
+                    if (SponsorBlockService.CheckAndGetSkipTarget(cur, _currentOfftopicSegments, out skipTo, out matched))
+                    {
+                        if (matched != null && _lastSkippedOfftopicUuid != matched.UUID)
+                        {
+                            _lastSkippedOfftopicUuid = matched.UUID;
+                            SafeDispatch(delegate
+                            {
+                                SeekToSeconds(skipTo);
+                                EmitStatus(string.Format("⏩ [SponsorBlock] {0} pulado ({1:0.0}s -> {2:0.0}s)", matched.CategoryLabel, matched.Start, matched.End));
+                            });
+                        }
+                    }
                 }
             }
             catch { }
@@ -582,7 +638,7 @@ namespace LiteTube
         private void OnMediaEnded()
         {
             if (_currentIndex < 0 || _queue.Count == 0) return;
-            if (!_isPlaying && (_player != null && !_player.HasEnded)) return;
+            if (!_isPlaying && (_player != null && _player.Status != FlyleafLib.MediaPlayer.Status.Ended)) return;
             _isPlaying = false;
 
             double elapsedSec = (DateTime.UtcNow - _playStartUtc).TotalSeconds;

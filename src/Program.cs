@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Net;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -23,8 +24,47 @@ namespace LiteTube
         [STAThread]
         private static void Main()
         {
+            AppDomain.CurrentDomain.AssemblyResolve += (s, resolveArgs) =>
+            {
+                try
+                {
+                    string asmName = new System.Reflection.AssemblyName(resolveArgs.Name).Name;
+                    if (asmName == "AsyncImageLoader.WPF" || asmName == "AsyncImageLoader")
+                    {
+                        return typeof(Program).Assembly;
+                    }
+                    string libPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "lib", asmName + ".dll");
+                    if (File.Exists(libPath))
+                    {
+                        try { return System.Reflection.Assembly.LoadFrom(libPath); }
+                        catch { return System.Reflection.Assembly.Load(File.ReadAllBytes(libPath)); }
+                    }
+                    string rootPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, asmName + ".dll");
+                    if (File.Exists(rootPath))
+                    {
+                        try { return System.Reflection.Assembly.LoadFrom(rootPath); }
+                        catch { return System.Reflection.Assembly.Load(File.ReadAllBytes(rootPath)); }
+                    }
+                }
+                catch { }
+                return null;
+            };
+
             Logger.Init();
             Logger.Info("APP", "Iniciando LiteTube...");
+
+            // Inicializa e destrava o pool de rede global (32 conexões simultâneas, TLS 1.2 / 1.3, sem Nagle)
+            App.InitializeNetworkPool();
+            if (System.Windows.Application.Current == null)
+            {
+                new App { ShutdownMode = System.Windows.ShutdownMode.OnExplicitShutdown };
+            }
+
+            string backupDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "backup", "pre_wpf_redesign");
+            if (Directory.Exists(backupDir))
+            {
+                Logger.Info("BACKUP", "Backup preventivo (backup/pre_wpf_redesign) verificado e confirmado com sucesso em: " + backupDir);
+            }
 
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
             Application.ThreadException += (s, e) => HandleException(e.Exception, false);
@@ -39,9 +79,19 @@ namespace LiteTube
             _singleInstanceMutex = new Mutex(true, "LiteTube_SingleInstance_Mutex_v2", out createdNew);
             if (!createdNew)
             {
-                Logger.Warn("APP", "Instância duplicada detectada. Restaurando janela existente e encerrando.");
+                Logger.Warn("APP", "Instância duplicada detectada. Restaurando janela existente e repassando argumentos.");
                 try
                 {
+                    string[] cliArgs = Environment.GetCommandLineArgs();
+                    if (cliArgs.Length > 1 && !string.IsNullOrWhiteSpace(cliArgs[1]) && !cliArgs[1].StartsWith("--"))
+                    {
+                        try
+                        {
+                            HttpPipeline.Client.GetStringAsync("http://127.0.0.1:48125/play?url=" + Uri.EscapeDataString(cliArgs[1].Trim())).GetAwaiter().GetResult();
+                        }
+                        catch { }
+                    }
+
                     Process current = Process.GetCurrentProcess();
                     foreach (Process proc in Process.GetProcessesByName(current.ProcessName))
                     {
@@ -68,10 +118,45 @@ namespace LiteTube
             }
             catch { }
 
+            InitializeFlyleafEngine();
+
             Logger.Info("APP", "Iniciando loop da interface gráfica (MainForm)...");
-            Application.Run(new MainForm());
+            var mainForm = new MainForm();
+            string[] args = Environment.GetCommandLineArgs();
+            for (int i = 1; i < args.Length; i++)
+            {
+                if (string.Equals(args[i], "--self-test", StringComparison.OrdinalIgnoreCase))
+                {
+                    mainForm.Shown += async (s, e) =>
+                    {
+                        await mainForm.RunSelfTestProtocolAsync();
+                    };
+                    break;
+                }
+            }
+            Application.Run(mainForm);
             Logger.Info("APP", "LiteTube finalizado com sucesso.");
             GC.KeepAlive(_singleInstanceMutex);
+        }
+
+        private static void InitializeFlyleafEngine()
+        {
+            try
+            {
+                string ffmpegPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "FFmpeg");
+                string pluginsPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Plugins");
+                FlyleafLib.Engine.Start(new FlyleafLib.EngineConfig()
+                {
+                    UIRefreshInterval = 30,
+                    PluginsPath = Directory.Exists(pluginsPath) ? pluginsPath : ":FFmpeg",
+                    FFmpegPath = Directory.Exists(ffmpegPath) ? ffmpegPath : ":FFmpeg"
+                });
+                Logger.Info("FLYLEAF", "Motor FlyleafLib / Direct3D 11 inicializado com sucesso.");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("FLYLEAF", "Falha ao inicializar o motor FlyleafLib", ex);
+            }
         }
 
         private static void HandleException(Exception ex, bool isFatal)

@@ -3,16 +3,33 @@ data/
 logs/
 .tmp.driveupload/
 
-# Arquivos de compilação temporários e depuração
+# Arquivos e pastas de compilação temporários e depuração
 bin/Debug/
 bin/Release/
+bin/x64/
 obj/
 *.old.exe
 *.pdb
+
+# Backups e arquivos legados
+backup/
+*.legacy*
+lib/
 
 # Binários pesados de terceiros (>100MB - excedem o limite estrito do GitHub)
 bin/ffmpeg.exe
 bin/ffprobe.exe
 
-# Diretório de rascunho
+# Diretório de rascunho e distribuição
 scratch/
+dist/
+
+# Artefatos compilados na raiz (sincronizados pelo build.bat a partir de bin/)
+/*.dll
+/*.deps.json
+/*.runtimeconfig.json
+/*.dll.config
+/WpfMediaListControl.xaml
+/WpfMusicPlayerBar.xaml
+/WpfVideoPlayerOverlay.xaml
+/App.xaml

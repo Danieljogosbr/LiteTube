@@ -2,393 +2,16 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.Net;
-using System.Net.Sockets;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace LiteTube
 {
     /// <summary>
-    /// High-speed localhost HTTP Range Proxy that converts LibVLC's open-ended "Range: bytes=X-" requests
-    /// into bounded 5MB chunk requests ("Range: bytes=X-Y") against googlevideo.com.
-    /// This completely bypasses YouTube's 40 KB/s real-time rate throttling (boosting speed from ~500 KB/s to 30+ MB/s)
-    /// and prewarms the first 512 KB (ftyp + moov + audio headers) in RAM for 0ms seek and start latency.
-    /// </summary>
-    internal sealed class LocalRangeUnthrottlerProxy : IDisposable
-    {
-        private const int HeaderCacheSize = 512 * 1024; // 512 KB covers ftyp + moov headers for 99.9% of videos
-        private readonly string _videoUrl;
-        private readonly string _audioUrl;
-        private long _videoTotalLen;
-        private long _audioTotalLen;
-        private long _maxVideoByteLoaded = 0;
-        private TcpListener _listener;
-        private volatile bool _running = true;
-        private readonly List<TcpClient> _activeClients = new List<TcpClient>();
-        private readonly object _clientsLock = new object();
-
-        private byte[] _videoHeaderCache = null;
-        private byte[] _audioHeaderCache = null;
-        private readonly object _vCacheLock = new object();
-        private readonly object _aCacheLock = new object();
-
-        private bool _videoIsWebm = false;
-        private bool _audioIsWebm = false;
-
-        public int Port { get; private set; }
-        public string VideoLoopbackUrl { get { return string.Format("http://127.0.0.1:{0}/video", Port); } }
-        public string AudioLoopbackUrl { get { return string.Format("http://127.0.0.1:{0}/audio", Port); } }
-        public string VideoUrl { get { return _videoUrl; } }
-        public string AudioUrl { get { return _audioUrl; } }
-
-        public double BufferedFraction
-        {
-            get
-            {
-                if (_videoTotalLen > 0 && _maxVideoByteLoaded > 0)
-                {
-                    return Math.Max(0.0, Math.Min(1.0, (double)_maxVideoByteLoaded / _videoTotalLen));
-                }
-                return 0.0;
-            }
-        }
-
-        static LocalRangeUnthrottlerProxy()
-        {
-            try
-            {
-                ServicePointManager.DefaultConnectionLimit = 64;
-                ServicePointManager.Expect100Continue = false;
-                ServicePointManager.UseNagleAlgorithm = false;
-            }
-            catch { }
-        }
-
-        public LocalRangeUnthrottlerProxy(string videoUrl, string audioUrl)
-        {
-            _videoUrl = videoUrl;
-            _audioUrl = audioUrl;
-            _videoTotalLen = ParseContentLength(videoUrl, 500000000L);
-            _audioTotalLen = ParseContentLength(audioUrl, 50000000L);
-
-            _videoIsWebm = videoUrl != null && (
-                videoUrl.IndexOf("mime=video%2Fwebm", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                videoUrl.IndexOf("mime=video/webm", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                videoUrl.IndexOf("mime=audio%2Fwebm", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                videoUrl.IndexOf("mime=audio/webm", StringComparison.OrdinalIgnoreCase) >= 0);
-            _audioIsWebm = audioUrl != null && (audioUrl.IndexOf("mime=audio%2Fwebm", StringComparison.OrdinalIgnoreCase) >= 0 || audioUrl.IndexOf("mime=audio/webm", StringComparison.OrdinalIgnoreCase) >= 0);
-
-            _listener = new TcpListener(IPAddress.Loopback, 0);
-            _listener.Start();
-            Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
-            Task.Run(() => AcceptLoopAsync());
-        }
-
-        private static long ParseContentLength(string url, long fallback)
-        {
-            if (string.IsNullOrEmpty(url)) return fallback;
-            var m = Regex.Match(url, @"[?&]clen=(\d+)");
-            if (m.Success)
-            {
-                long val;
-                if (long.TryParse(m.Groups[1].Value, out val) && val > 1024) return val;
-            }
-            return fallback;
-        }
-
-        public async Task PrewarmHeadersAsync()
-        {
-            try
-            {
-                var tasks = new List<Task>();
-                if (!string.IsNullOrEmpty(_videoUrl))
-                    tasks.Add(Task.Run(() => EnsureHeaderCached(false)));
-                if (!string.IsNullOrEmpty(_audioUrl) && !string.Equals(_videoUrl, _audioUrl, StringComparison.OrdinalIgnoreCase))
-                    tasks.Add(Task.Run(() => EnsureHeaderCached(true)));
-
-                if (tasks.Count > 0)
-                    await Task.WhenAll(tasks);
-            }
-            catch { }
-        }
-
-        private byte[] EnsureHeaderCached(bool isAudio)
-        {
-            if (isAudio)
-            {
-                if (_audioHeaderCache != null) return _audioHeaderCache;
-                lock (_aCacheLock)
-                {
-                    if (_audioHeaderCache != null) return _audioHeaderCache;
-                    string aUrl = _audioUrl ?? _videoUrl;
-                    if (string.IsNullOrEmpty(aUrl)) return null;
-                    long detLen;
-                    _audioHeaderCache = FetchRangeBytes(aUrl, 0, Math.Min(_audioTotalLen - 1, HeaderCacheSize - 1), out detLen);
-                    if (detLen > 0) _audioTotalLen = detLen;
-                    return _audioHeaderCache;
-                }
-            }
-            else
-            {
-                if (_videoHeaderCache != null) return _videoHeaderCache;
-                lock (_vCacheLock)
-                {
-                    if (_videoHeaderCache != null) return _videoHeaderCache;
-                    string vUrl = _videoUrl ?? _audioUrl;
-                    if (string.IsNullOrEmpty(vUrl)) return null;
-                    long detLen;
-                    _videoHeaderCache = FetchRangeBytes(vUrl, 0, Math.Min(_videoTotalLen - 1, HeaderCacheSize - 1), out detLen);
-                    if (detLen > 0) _videoTotalLen = detLen;
-                    return _videoHeaderCache;
-                }
-            }
-        }
-
-        private static byte[] FetchRangeBytes(string url, long start, long end, out long detectedTotalLen)
-        {
-            detectedTotalLen = -1;
-            if (string.IsNullOrEmpty(url)) return null;
-            try
-            {
-                var req = (HttpWebRequest)WebRequest.Create(url);
-                req.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
-                req.KeepAlive = true;
-                req.Timeout = 8000;
-                req.ReadWriteTimeout = 8000;
-                req.AddRange(start, end);
-                using (var resp = (HttpWebResponse)req.GetResponse())
-                {
-                    string cr = resp.Headers["Content-Range"];
-                    if (!string.IsNullOrEmpty(cr))
-                    {
-                        var m = Regex.Match(cr, @"/(\d+)");
-                        if (m.Success)
-                        {
-                            long.TryParse(m.Groups[1].Value, out detectedTotalLen);
-                        }
-                    }
-                    using (var s = resp.GetResponseStream())
-                    using (var ms = new MemoryStream((int)(end - start + 1)))
-                    {
-                        byte[] buf = new byte[32768];
-                        int n;
-                        while ((n = s.Read(buf, 0, buf.Length)) > 0)
-                        {
-                            ms.Write(buf, 0, n);
-                        }
-                        return ms.ToArray();
-                    }
-                }
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        private async Task AcceptLoopAsync()
-        {
-            while (_running)
-            {
-                try
-                {
-                    var client = await _listener.AcceptTcpClientAsync();
-                    client.NoDelay = true;
-                    lock (_clientsLock)
-                    {
-                        if (!_running)
-                        {
-                            try { client.Close(); } catch { }
-                            break;
-                        }
-                        _activeClients.Add(client);
-                    }
-                    var _ = Task.Run(() => HandleClient(client));
-                }
-                catch
-                {
-                    break;
-                }
-            }
-        }
-
-        private void HandleClient(TcpClient client)
-        {
-            try
-            {
-                using (var stream = client.GetStream())
-                {
-                    try
-                    {
-                        byte[] reqBuf = new byte[4096];
-                        int read = stream.Read(reqBuf, 0, reqBuf.Length);
-                        if (read <= 0) return;
-
-                        string req = Encoding.ASCII.GetString(reqBuf, 0, read);
-                        bool isAudio = req.IndexOf("/audio", StringComparison.OrdinalIgnoreCase) >= 0;
-                        bool isHead = req.StartsWith("HEAD", StringComparison.OrdinalIgnoreCase);
-                        string targetUrl = isAudio ? (_audioUrl ?? _videoUrl) : (_videoUrl ?? _audioUrl);
-
-                        // Garante que o header e o tamanho real (_audioTotalLen / _videoTotalLen via Content-Range)
-                        // sejam populados ANTES de responder os cabeçalhos HTTP ao LibVLC, evitando erro HTTP 416.
-                        EnsureHeaderCached(isAudio);
-
-                        long totalLen = isAudio ? (_audioUrl != null ? _audioTotalLen : _videoTotalLen) : (_videoUrl != null ? _videoTotalLen : _audioTotalLen);
-
-                        long startByte = 0;
-                        long endByte = totalLen - 1;
-                        var m = Regex.Match(req, @"Range:\s*bytes=(\d+)-(\d*)", RegexOptions.IgnoreCase);
-                        bool hasRange = m.Success;
-                        if (hasRange)
-                        {
-                            long.TryParse(m.Groups[1].Value, out startByte);
-                            if (!string.IsNullOrEmpty(m.Groups[2].Value))
-                            {
-                                long eb;
-                                if (long.TryParse(m.Groups[2].Value, out eb) && eb >= startByte)
-                                {
-                                    endByte = Math.Min(totalLen - 1, eb);
-                                }
-                            }
-                        }
-
-                        bool isAudioStream = isAudio || (targetUrl != null && (
-                            targetUrl.IndexOf("mime=audio", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                            targetUrl.IndexOf("mime=audio%2F", StringComparison.OrdinalIgnoreCase) >= 0));
-
-                        bool isWebm = (targetUrl != null && (
-                            targetUrl.IndexOf("mime=video%2Fwebm", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                            targetUrl.IndexOf("mime=video/webm", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                            targetUrl.IndexOf("mime=audio%2Fwebm", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                            targetUrl.IndexOf("mime=audio/webm", StringComparison.OrdinalIgnoreCase) >= 0));
-
-                        string mime = isAudioStream ? (isWebm ? "audio/webm" : "audio/mp4") : (isWebm ? "video/webm" : "video/mp4");
-
-                        string respHeader;
-                        if (hasRange)
-                        {
-                            respHeader = string.Format(
-                                "HTTP/1.1 206 Partial Content\r\nContent-Type: {0}\r\nAccept-Ranges: bytes\r\nContent-Range: bytes {1}-{2}/{3}\r\nContent-Length: {4}\r\nConnection: close\r\n\r\n",
-                                mime,
-                                startByte,
-                                endByte,
-                                totalLen,
-                                endByte - startByte + 1
-                            );
-                        }
-                        else
-                        {
-                            respHeader = string.Format(
-                                "HTTP/1.1 200 OK\r\nContent-Type: {0}\r\nAccept-Ranges: bytes\r\nContent-Length: {1}\r\nConnection: close\r\n\r\n",
-                                mime,
-                                totalLen
-                            );
-                        }
-                        byte[] hdrBytes = Encoding.ASCII.GetBytes(respHeader);
-                        stream.Write(hdrBytes, 0, hdrBytes.Length);
-
-                        if (isHead) return;
-
-                        long cur = startByte;
-
-                        // Serve from RAM cache if reading from the header (0..HeaderCacheSize)
-                        if (cur < HeaderCacheSize)
-                        {
-                            byte[] cachedHdr = EnsureHeaderCached(isAudio);
-                            if (cachedHdr != null && cur < cachedHdr.Length)
-                            {
-                                int count = (int)Math.Min((long)cachedHdr.Length - cur, endByte - cur + 1);
-                                if (count > 0)
-                                {
-                                    stream.Write(cachedHdr, (int)cur, count);
-                                    stream.Flush();
-                                    cur += count;
-                                    if (!isAudio && cur > _maxVideoByteLoaded) _maxVideoByteLoaded = cur;
-                                }
-                            }
-                        }
-
-                        // Stream subsequent data in bounded unthrottled chunks
-                        long chunkSize = isAudio ? (1024 * 1024) : (5 * 1024 * 1024);
-                        byte[] copyBuf = new byte[65536];
-
-                        while (cur <= endByte && _running)
-                        {
-                            long chunkEnd = Math.Min(endByte, cur + chunkSize - 1);
-                            var webReq = (HttpWebRequest)WebRequest.Create(targetUrl);
-                            webReq.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
-                            webReq.KeepAlive = true;
-                            webReq.Timeout = 10000;
-                            webReq.ReadWriteTimeout = 10000;
-                            webReq.AddRange(cur, chunkEnd);
-
-                            using (var resp = (HttpWebResponse)webReq.GetResponse())
-                            using (var respStream = resp.GetResponseStream())
-                            {
-                                int n;
-                                while ((n = respStream.Read(copyBuf, 0, copyBuf.Length)) > 0)
-                                {
-                                    if (!_running) break;
-                                    stream.Write(copyBuf, 0, n);
-                                    cur += n;
-                                    if (!isAudio && cur > _maxVideoByteLoaded) _maxVideoByteLoaded = cur;
-                                }
-                            }
-                        }
-                    }
-                    catch
-                    {
-                        // Normal when player stops or seeks before finishing the stream chunk
-                    }
-                }
-            }
-            finally
-            {
-                lock (_clientsLock)
-                {
-                    _activeClients.Remove(client);
-                }
-                try { client.Close(); } catch { }
-            }
-        }
-
-        public void Dispose()
-        {
-            _running = false;
-
-            // Fecha explicitamente todas as conexões ativas antes de parar o listener
-            lock (_clientsLock)
-            {
-                for (int i = _activeClients.Count - 1; i >= 0; i--)
-                {
-                    try
-                    {
-                        var c = _activeClients[i];
-                        c.Close();
-                    }
-                    catch { }
-                }
-                _activeClients.Clear();
-            }
-
-            try
-            {
-                if (_listener != null)
-                {
-                    _listener.Stop();
-                }
-            }
-            catch { }
-        }
-    }
-
-    /// <summary>
-    /// Manages high-speed direct video stream resolution and unthrottled loopback delivery for LibVLC.
-    /// Uses yt-dlp with multi-client fallback (Firefox/Chrome cookies -> Deno JS runtime -> VisionOS)
-    /// to bypass YouTube bot detection and delivers streams through LocalRangeUnthrottlerProxy.
+    /// Gerencia a resolução de fluxos diretos de vídeo e áudio do YouTube para o motor FlyleafLib (FFmpeg / Direct3D 11).
+    /// Utiliza o yt-dlp com estratégia de fallback multi-cliente (Cookies -> Deno JS Runtime -> VisionOS)
+    /// para obter as URLs diretas de googlevideo.com, sem depender de intermediários ou proxies de loopback local.
     /// </summary>
     public class ProgressiveVideoSession : IDisposable
     {
@@ -402,9 +25,8 @@ namespace LiteTube
         private readonly CancellationTokenSource _sessionCts = new CancellationTokenSource();
         private string _resolvedVideoUrl = null;
         private string _resolvedAudioUrl = null;
-        private string _activeCodecName = "AV1/H.264";
+        private string _activeCodecName = "Direct3D 11 / FFmpeg";
         private string _lastResolveError = null;
-        private LocalRangeUnthrottlerProxy _rangeProxy = null;
         private readonly SemaphoreSlim _resolveLock = new SemaphoreSlim(1, 1);
         private double _knownDurationSeconds = 0;
 
@@ -423,42 +45,112 @@ namespace LiteTube
         public double KnownDurationSeconds { get { return _knownDurationSeconds; } }
         public string ActiveCodecName { get { return _activeCodecName; } }
 
-        public double BufferedFraction
-        {
-            get
-            {
-                if (_rangeProxy != null && _rangeProxy.BufferedFraction > 0)
-                {
-                    return _rangeProxy.BufferedFraction;
-                }
-                return 0.0;
-            }
-        }
-
         public async Task<string[]> ResolveStreamUrlsAsync(CancellationToken token)
         {
             bool ok = await EnsureStreamUrlsResolvedAsync(token);
             if (!ok || string.IsNullOrEmpty(_resolvedVideoUrl)) return null;
-            if (_rangeProxy != null)
-            {
-                string aLoop = !string.IsNullOrEmpty(_resolvedAudioUrl) && !string.Equals(_resolvedVideoUrl, _resolvedAudioUrl, StringComparison.OrdinalIgnoreCase)
-                    ? _rangeProxy.AudioLoopbackUrl
-                    : null;
-                return new string[] { _rangeProxy.VideoLoopbackUrl, aLoop, _activeCodecName };
-            }
+
             return new string[] { _resolvedVideoUrl, _resolvedAudioUrl, _activeCodecName };
+        }
+
+        public static (string videoUrl, string audioUrl) ResolveStreamUrls(string videoId, int targetHeight)
+        {
+            return ResolveStreamUrls(videoId, targetHeight, null, null, null);
+        }
+
+        public static (string videoUrl, string audioUrl) ResolveStreamUrls(string videoId, int targetHeight, string binDir, string browserForCookies = null, string cookiesFilePath = null)
+        {
+            if (string.IsNullOrEmpty(videoId)) return (null, null);
+
+            if (string.IsNullOrEmpty(binDir))
+            {
+                binDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "bin");
+            }
+
+            if (string.IsNullOrEmpty(browserForCookies) && string.IsNullOrEmpty(cookiesFilePath))
+            {
+                try
+                {
+                    var cfg = AppConfig.Load();
+                    if (cfg != null)
+                    {
+                        browserForCookies = cfg.BrowserForCookies;
+                        cookiesFilePath = cfg.CookiesFilePath;
+                    }
+                }
+                catch { }
+            }
+
+            var dummyItem = new TrackItem { Id = videoId, Title = "QualitySwitch" };
+            using (var session = new ProgressiveVideoSession(dummyItem, targetHeight, binDir, browserForCookies, cookiesFilePath))
+            {
+                using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+                {
+                    var urls = session.ResolveStreamUrlsAsync(cts.Token).GetAwaiter().GetResult();
+                    if (urls != null && urls.Length > 0 && !string.IsNullOrEmpty(urls[0]))
+                    {
+                        string v = urls[0];
+                        string a = urls.Length > 1 ? urls[1] : null;
+                        return (v, a);
+                    }
+                }
+            }
+
+            return (null, null);
+        }
+
+        public static async Task<(string videoUrl, string audioUrl)> ResolveStreamUrlsAsync(string videoId, int targetHeight, string binDir = null, string browserForCookies = null, string cookiesFilePath = null, CancellationToken token = default)
+        {
+            if (string.IsNullOrEmpty(videoId)) return (null, null);
+
+            if (string.IsNullOrEmpty(binDir))
+            {
+                binDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "bin");
+            }
+
+            if (string.IsNullOrEmpty(browserForCookies) && string.IsNullOrEmpty(cookiesFilePath))
+            {
+                try
+                {
+                    var cfg = AppConfig.Load();
+                    if (cfg != null)
+                    {
+                        browserForCookies = cfg.BrowserForCookies;
+                        cookiesFilePath = cfg.CookiesFilePath;
+                    }
+                }
+                catch { }
+            }
+
+            var dummyItem = new TrackItem { Id = videoId, Title = "QualitySwitch" };
+            using (var session = new ProgressiveVideoSession(dummyItem, targetHeight, binDir, browserForCookies, cookiesFilePath))
+            {
+                using (var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(token))
+                {
+                    linkedCts.CancelAfter(TimeSpan.FromSeconds(30));
+                    var urls = await session.ResolveStreamUrlsAsync(linkedCts.Token);
+                    if (urls != null && urls.Length > 0 && !string.IsNullOrEmpty(urls[0]))
+                    {
+                        string v = urls[0];
+                        string a = urls.Length > 1 ? urls[1] : null;
+                        return (v, a);
+                    }
+                }
+            }
+
+            return (null, null);
         }
 
         private async Task<bool> EnsureStreamUrlsResolvedAsync(CancellationToken token)
         {
-            if (_rangeProxy != null && !string.IsNullOrEmpty(_resolvedVideoUrl))
+            if (!string.IsNullOrEmpty(_resolvedVideoUrl))
                 return true;
 
             await _resolveLock.WaitAsync(token);
             var sw = Stopwatch.StartNew();
             try
             {
-                if (_rangeProxy != null && !string.IsNullOrEmpty(_resolvedVideoUrl))
+                if (!string.IsNullOrEmpty(_resolvedVideoUrl))
                     return true;
 
                 Logger.Info("STREAM", string.Format("EnsureStreamUrlsResolvedAsync iniciando: vidId={0}, height={1}p",
@@ -466,7 +158,7 @@ namespace LiteTube
 
                 string videoUrl = "https://www.youtube.com/watch?v=" + (_video != null ? _video.Id : "");
                 string formatArg = string.Format("bestvideo[height<={0}]+bestaudio/best[height<={0}]", _height);
-                string sortArg = string.Format("res:{0},vcodec:av01,vcodec:vp9,vcodec:h264,acodec:opus,acodec:m4a", _height);
+                string sortArg = string.Format("res:{0},vcodec:av01,vcodec:vp9.2,vcodec:vp9,vcodec:h264,acodec:opus,acodec:m4a", _height);
 
                 string denoPath = Path.Combine(_binDir, "deno.exe");
                 string jsArg = File.Exists(denoPath) ? string.Format("--js-runtimes \"deno:{0}\" ", denoPath) : "";
@@ -478,48 +170,55 @@ namespace LiteTube
                 {
                     string attempt1Args = (!string.IsNullOrEmpty(cookieArg) ? cookieArg : "") + jsArg + "--extractor-args \"youtube:player_skip=hls\" ";
                     Logger.Info("STREAM", "Tentativa 1 (Primária): yt-dlp com player_skip=hls e cookies...");
-                    urls = await Task.Run(() => RunYtDlpGetUrls(attempt1Args, formatArg, sortArg, videoUrl, token), token);
+                    urls = await Task.Run(() => RunYtDlpGetUrls(videoUrl, formatArg, sortArg, attempt1Args, token));
                 }
 
-                // Se houver erro definitivo (vídeo privado, restrito a membros ou indisponível), aborta imediatamente!
-                bool isFatalError = !string.IsNullOrEmpty(_lastResolveError);
-
-                // Tentativa 2 (Fallback): Chamada limpa web padrão (sem cookies), caso não seja erro definitivo
-                if ((urls == null || urls.Length == 0) && !token.IsCancellationRequested && !isFatalError)
+                // Tentativa 2: Cliente Android (muda assinatura de bot)
+                if ((urls == null || urls.Length == 0) && !token.IsCancellationRequested)
                 {
-                    Logger.Info("STREAM", "Tentativa 2 (Fallback): Chamada limpa web padrão...");
-                    string fallbackArgs = jsArg + "--extractor-args \"youtube:player_skip=hls\" ";
-                    urls = await Task.Run(() => RunYtDlpGetUrls(fallbackArgs, formatArg, sortArg, videoUrl, token), token);
+                    Logger.Warn("STREAM", "Tentativa 1 falhou. Tentativa 2: yt-dlp com cliente android...");
+                    string attempt2Args = jsArg + "--extractor-args \"youtube:player_client=android\" ";
+                    urls = await Task.Run(() => RunYtDlpGetUrls(videoUrl, formatArg, sortArg, attempt2Args, token));
                 }
 
-                if (urls == null || urls.Length == 0 || token.IsCancellationRequested)
+                // Tentativa 3: Cliente iOS
+                if ((urls == null || urls.Length == 0) && !token.IsCancellationRequested)
                 {
-                    string failMsg = !string.IsNullOrEmpty(_lastResolveError) ? _lastResolveError : "urls=null ou vazio";
-                    Logger.Warn("STREAM", string.Format("EnsureStreamUrlsResolvedAsync falhou após {0}ms: {1}", sw.ElapsedMilliseconds, failMsg));
-                    return false;
+                    Logger.Warn("STREAM", "Tentativa 2 falhou. Tentativa 3: yt-dlp com cliente ios...");
+                    string attempt3Args = jsArg + "--extractor-args \"youtube:player_client=ios\" ";
+                    urls = await Task.Run(() => RunYtDlpGetUrls(videoUrl, formatArg, sortArg, attempt3Args, token));
                 }
 
-                _resolvedVideoUrl = urls[0];
-                _resolvedAudioUrl = urls.Length > 1 ? urls[1] : urls[0];
-                _activeCodecName = DetectCodecFromUrl(_resolvedVideoUrl);
-
-                // Parse duration from URL if available
-                var durMatch = Regex.Match(_resolvedVideoUrl, @"[?&]dur=([\d\.]+)");
-                if (durMatch.Success)
+                // Tentativa 4: Cliente Web Padrão sem cookies adicionais
+                if ((urls == null || urls.Length == 0) && !token.IsCancellationRequested)
                 {
-                    double parsedDur;
-                    if (double.TryParse(durMatch.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out parsedDur) && parsedDur > 1)
-                    {
-                        _knownDurationSeconds = parsedDur;
-                    }
+                    Logger.Warn("STREAM", "Tentativa 3 falhou. Tentativa 4: yt-dlp cliente web padrão limpo...");
+                    string attempt4Args = jsArg;
+                    urls = await Task.Run(() => RunYtDlpGetUrls(videoUrl, formatArg, sortArg, attempt4Args, token));
                 }
 
-                Logger.Info("STREAM", string.Format("EnsureStreamUrlsResolvedAsync sucesso ({0}ms): Codec={1}, Dur={2:0.0}s",
-                    sw.ElapsedMilliseconds, _activeCodecName, _knownDurationSeconds));
+                if (urls != null && urls.Length > 0 && !string.IsNullOrEmpty(urls[0]))
+                {
+                    _resolvedVideoUrl = urls[0];
+                    _resolvedAudioUrl = urls.Length > 1 ? urls[1] : null;
 
-                _rangeProxy = new LocalRangeUnthrottlerProxy(_resolvedVideoUrl, _resolvedAudioUrl);
-                await _rangeProxy.PrewarmHeadersAsync();
-                return true;
+                    _activeCodecName = DetectCodecFromUrls(_resolvedVideoUrl, _resolvedAudioUrl);
+                    int vItag = ExtractItag(_resolvedVideoUrl);
+                    int aItag = ExtractItag(_resolvedAudioUrl);
+
+                    Logger.Info("STREAM", string.Format("Fluxos diretos obtidos em {0}ms: Video='{1}' (itag={2}), Audio='{3}' (itag={4}), Codec='{5}'",
+                        sw.ElapsedMilliseconds,
+                        _resolvedVideoUrl.Substring(0, Math.Min(60, _resolvedVideoUrl.Length)) + "...",
+                        vItag > 0 ? vItag.ToString() : "desconhecido",
+                        _resolvedAudioUrl != null ? (_resolvedAudioUrl.Substring(0, Math.Min(60, _resolvedAudioUrl.Length)) + "...") : "embutido",
+                        aItag > 0 ? aItag.ToString() : "desconhecido",
+                        _activeCodecName));
+
+                    return true;
+                }
+
+                Logger.Error("STREAM", string.Format("Falha definitiva ao obter URLs com yt-dlp após {0}ms.", sw.ElapsedMilliseconds));
+                return false;
             }
             finally
             {
@@ -527,55 +226,36 @@ namespace LiteTube
             }
         }
 
-        private static string DetectCodecFromUrl(string url)
-        {
-            if (string.IsNullOrEmpty(url)) return "H.264";
-            var m = Regex.Match(url, @"[?&]itag=(\d+)");
-            if (m.Success)
-            {
-                int itag;
-                if (int.TryParse(m.Groups[1].Value, out itag))
-                {
-                    if (itag == 133 || itag == 134 || itag == 135 || itag == 136 || itag == 137 || itag == 160 || itag == 298 || itag == 299 || itag == 18 || itag == 22) return "H.264";
-                    if (itag >= 394 && itag <= 401) return "AV1";
-                    if (itag == 242 || itag == 243 || itag == 244 || itag == 247 || itag == 248 || itag == 271 || itag == 278 || (itag >= 302 && itag <= 337) || (itag >= 602 && itag <= 628)) return "VP9";
-                }
-            }
-            if (url.IndexOf("mime=video%2Fwebm", StringComparison.OrdinalIgnoreCase) >= 0 || url.IndexOf("mime=video/webm", StringComparison.OrdinalIgnoreCase) >= 0)
-                return "VP9";
-            if (url.IndexOf("av01", StringComparison.OrdinalIgnoreCase) >= 0)
-                return "AV1";
-            return "H.264";
-        }
-
         private string GetCookieArg()
         {
             if (!string.IsNullOrEmpty(_cookiesFilePath) && File.Exists(_cookiesFilePath))
             {
-                GoogleAuthDialog.SanitizeCookieFile(_cookiesFilePath);
                 return string.Format("--cookies \"{0}\" ", _cookiesFilePath);
             }
             if (!string.IsNullOrEmpty(_browserForCookies) && _browserForCookies != "none")
+            {
                 return string.Format("--cookies-from-browser {0} ", _browserForCookies);
+            }
             return "";
         }
 
-        private string[] RunYtDlpGetUrls(string extraArgs, string formatArg, string sortArg, string videoUrl, CancellationToken token)
+        private string[] RunYtDlpGetUrls(string videoUrl, string formatArg, string sortArg, string extraArgs, CancellationToken token)
         {
+            if (!File.Exists(_ytDlpPath))
+            {
+                _lastResolveError = "Executável yt-dlp.exe não encontrado em bin/.";
+                return null;
+            }
+
             try
             {
-                string args = string.Format(
-                    "{0}--no-playlist --no-warnings -g -f \"{1}\" -S \"{2}\" \"{3}\"",
-                    extraArgs,
-                    formatArg,
-                    sortArg,
-                    videoUrl
-                );
+                string arguments = string.Format("-g -f \"{0}\" -S \"{1}\" --format-sort-force {2}\"{3}\"",
+                    formatArg, sortArg, extraArgs ?? "", videoUrl);
 
                 var psi = new ProcessStartInfo
                 {
                     FileName = _ytDlpPath,
-                    Arguments = args,
+                    Arguments = arguments,
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
@@ -664,6 +344,94 @@ namespace LiteTube
             }
         }
 
+        public static string DetectCodecFromUrls(string videoUrl, string audioUrl)
+        {
+            if (string.IsNullOrEmpty(videoUrl)) return "Direct3D 11 / FFmpeg";
+
+            int videoItag = ExtractItag(videoUrl);
+            int audioItag = ExtractItag(audioUrl);
+
+            string videoCodec;
+            // Cascata estrita de prioridade de codecs de vídeo: AV1 > VP9.2 > VP9 > H.264
+            if (IsAv1Itag(videoItag) || videoUrl.IndexOf("av01", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                videoCodec = "AV1";
+            }
+            else if (IsVp92Itag(videoItag) || videoUrl.IndexOf("vp09.02", StringComparison.OrdinalIgnoreCase) >= 0 || videoUrl.IndexOf("vp9.2", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                videoCodec = "VP9.2 HDR";
+            }
+            else if (IsVp9Itag(videoItag) || videoUrl.IndexOf("vp09", StringComparison.OrdinalIgnoreCase) >= 0 || videoUrl.IndexOf("vp9", StringComparison.OrdinalIgnoreCase) >= 0 || videoUrl.IndexOf("mime=video%2Fwebm", StringComparison.OrdinalIgnoreCase) >= 0 || videoUrl.IndexOf("mime=video/webm", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                videoCodec = "VP9";
+            }
+            else if (IsH264Itag(videoItag) || videoUrl.IndexOf("avc1", StringComparison.OrdinalIgnoreCase) >= 0 || videoUrl.IndexOf("h264", StringComparison.OrdinalIgnoreCase) >= 0 || videoUrl.IndexOf("mime=video%2Fmp4", StringComparison.OrdinalIgnoreCase) >= 0 || videoUrl.IndexOf("mime=video/mp4", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                videoCodec = "H.264";
+            }
+            else
+            {
+                videoCodec = "Direct3D 11";
+            }
+
+            string audioCodec = "AAC";
+            if (audioItag == 249 || audioItag == 250 || audioItag == 251 ||
+                (!string.IsNullOrEmpty(audioUrl) && (audioUrl.IndexOf("opus", StringComparison.OrdinalIgnoreCase) >= 0 || audioUrl.IndexOf("mime=audio%2Fwebm", StringComparison.OrdinalIgnoreCase) >= 0 || audioUrl.IndexOf("mime=audio/webm", StringComparison.OrdinalIgnoreCase) >= 0)))
+            {
+                audioCodec = "Opus";
+            }
+            else if (audioItag == 139 || audioItag == 140 || audioItag == 141 ||
+                (!string.IsNullOrEmpty(audioUrl) && (audioUrl.IndexOf("mp4a", StringComparison.OrdinalIgnoreCase) >= 0 || audioUrl.IndexOf("aac", StringComparison.OrdinalIgnoreCase) >= 0 || audioUrl.IndexOf("mime=audio%2Fmp4", StringComparison.OrdinalIgnoreCase) >= 0 || audioUrl.IndexOf("mime=audio/mp4", StringComparison.OrdinalIgnoreCase) >= 0)))
+            {
+                audioCodec = "AAC";
+            }
+
+            return string.Format("{0}/{1} (Direct3D 11)", videoCodec, audioCodec);
+        }
+
+        public static int ExtractItag(string url)
+        {
+            if (string.IsNullOrEmpty(url)) return 0;
+            try
+            {
+                var match = System.Text.RegularExpressions.Regex.Match(url, @"[?&]itag=(\d+)");
+                if (match.Success)
+                {
+                    int itag;
+                    if (int.TryParse(match.Groups[1].Value, out itag))
+                        return itag;
+                }
+            }
+            catch { }
+            return 0;
+        }
+
+        public static bool IsAv1Itag(int itag)
+        {
+            // YouTube AV1: 394 (144p) até 402 (4320p), 571 (8K), 694-702 (AV1 Live)
+            return (itag >= 394 && itag <= 402) || itag == 571 || (itag >= 694 && itag <= 702);
+        }
+
+        public static bool IsVp92Itag(int itag)
+        {
+            // YouTube VP9.2 Profile 2 HDR: 330 (144p HDR) até 337 (2160p HDR)
+            return itag >= 330 && itag <= 337;
+        }
+
+        public static bool IsVp9Itag(int itag)
+        {
+            // YouTube VP9 Profile 0
+            return itag == 278 || (itag >= 242 && itag <= 248) || itag == 271 || itag == 313 ||
+                   itag == 302 || itag == 303 || itag == 308 || itag == 315 || itag == 272;
+        }
+
+        public static bool IsH264Itag(int itag)
+        {
+            // YouTube H.264 / AVC
+            return itag == 160 || (itag >= 133 && itag <= 137) || itag == 264 || itag == 266 ||
+                   itag == 298 || itag == 299 || itag == 18 || itag == 22 || itag == 37 || itag == 38;
+        }
+
         private static void SafeKillProcess(Process p)
         {
             try
@@ -679,11 +447,6 @@ namespace LiteTube
         public void Dispose()
         {
             _sessionCts.Cancel();
-            if (_rangeProxy != null)
-            {
-                _rangeProxy.Dispose();
-                _rangeProxy = null;
-            }
             _sessionCts.Dispose();
         }
     }

@@ -3,8 +3,13 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using FlyleafLib;
+using FlyleafLib.Controls.WinForms;
+using FlyleafLib.MediaPlayer;
+using FlyleafLib.MediaFramework.MediaStream;
 
 namespace LiteTube
 {
@@ -13,7 +18,7 @@ namespace LiteTube
     /// - Authentic YouTube Dark Layout (#0F0F0F), Filter Chips (Tudo | Vídeos | Canais) & Infinite Scroll
     /// - Isolated Official Channel Page with 3 YouTube Tabs: Início ("home"), Vídeos ("videos"), Playlists ("playlists")
     /// - Watch Page with Player, Full-Width Red/Gray Buffer SeekBar, Watch Metadata Panel below player, and Compact Right Sidebar
-    /// - LibVLC Direct3D 11 Native HWND Hardware-Accelerated Streaming with Unthrottled Loopback Delivery
+    /// - FlyleafLib Direct3D 11 Native Hardware-Accelerated Streaming with Direct FFmpeg Demuxing
     /// </summary>
     public class VideoEnvironmentControl : UserControl
     {
@@ -26,7 +31,6 @@ namespace LiteTube
         private readonly Color BgDark = Theme.Bg;
         private readonly Color BgPanel = Theme.Surface;
         private readonly Color BgCard = Theme.SurfaceHigh;
-        private readonly Color BgChipHover = Color.FromArgb(36, 36, 36);
         private readonly Color YouTubeRed = Theme.Accent;
         private readonly Color AccentBlue = Theme.Blue;
         private readonly Color AccentGreen = Color.FromArgb(46, 204, 113);
@@ -82,41 +86,19 @@ namespace LiteTube
         // Video Stage (Inside Watch Page)
         private Panel _playerStagePanel;
 
-        // LibVLC Native Player Engine
+        // FlyleafLib Native Player Engine & Unified Airspace-Safe WPF Overlay
         private Panel _videoCanvasContainer;
-        private Panel _vlcCanvas;
-        private VlcPlayer _vlcPlayer;
+        private FlyleafHost _flyleafHost;
+        private Player _player;
+        private Config _playerConfig;
+        private WpfVideoPlayerOverlay _wpfOverlay;
 
         private Panel _loadingOverlay;
         private Label _lblLoadingTitle;
         private Label _lblLoadingProgress;
         private Button _btnCancelLoad;
 
-        // Player Control Bar (Directly below video canvas: Full-width Red/Gray SeekBar + Transport + Quality + Theater/Fullscreen + Audio)
-        private Panel _videoBottomBar;
-        private PictureBox _customSeekBar;
-        private Button _btnVidPlayPause;
-        private Button _btnVidNext;
-        private Button _btnVidBack10;
-        private Button _btnVidFwd10;
-        private Button _btnVidStop;
-        private Label _lblVidTimeCombined;
-        private Button _btnQ360;
-        private Button _btnQ480;
-        private Button _btnQ720;
-        private Button _btnQ1080;
-        private Button _btnBottomTheater;
-        private Button _btnBottomFullscreen;
-
-        // Independent Video Audio Regulator Controls
-        private Button _btnVidMute;
-        private PictureBox _vidVolCustomBar;
-        private Button _btnVidAudioDialog;
-
-        private bool _isHoveringSeek = false;
-        private int _hoverSeekMouseX = -1;
-
-        // YouTube Watch Metadata Bar (Below Player Control Bar: Video Title, Channel Avatar, Channel Name, Acessar Canal, Salvar)
+        // YouTube Watch Metadata Bar (Below Player Canvas: Video Title, Channel Avatar, Channel Name, Acessar Canal, Salvar)
         private Panel _watchMetaPanel;
         private Label _lblVideoTitle;
         private PictureBox _picWatchChannelAvatar;
@@ -153,13 +135,10 @@ namespace LiteTube
         // Playback & Progressive Streaming State
         private TrackItem _currentVideo;
         private ProgressiveVideoSession _activeProgressiveSession;
-        private double _dragScrubSeconds = 0.0;
 
         private bool _isPlaying = false;
+        private bool _isSwitchingQuality = false;
         private bool _isLoading = false;
-        private bool _isDraggingSeek = false;
-        private bool _isDraggingVolBar = false;
-        private bool _isHoveringVolBar = false;
         private bool _isTheaterMode = false;
         private bool _isFullscreen = false;
         private FormWindowState _prevWindowState;
@@ -191,10 +170,11 @@ namespace LiteTube
 
         public double VideoVolume { get { return _config.VideoVolume; } }
         public bool IsVideoMuted { get { return _config.IsVideoMuted; } }
-        public bool IsVideoPlaying { get { return _isPlaying || (_vlcPlayer != null && _vlcPlayer.IsPlaying); } }
+        public bool IsVideoPlaying { get { return _isPlaying || (_player != null && _player.IsPlaying); } }
         public TrackItem CurrentVideo { get { return _currentVideo; } }
         public bool IsFullscreen { get { return _isFullscreen; } }
         public bool IsTheaterMode { get { return _isTheaterMode; } }
+        public bool IsOverlayVisible { get { return _wpfOverlay != null && _wpfOverlay.IsOverlayVisible; } }
 
         private void BuildUI()
         {
@@ -271,7 +251,7 @@ namespace LiteTube
 
             _lblBufferBadge = new Label
             {
-                Text = "⚡ Streaming Direct3D • LibVLC",
+                Text = "⚡ Streaming Direct3D 11 • FlyleafLib",
                 Font = new Font("Segoe UI", 8.5f),
                 ForeColor = TextSecondary,
                 Location = new Point(540, 12),
@@ -524,156 +504,22 @@ namespace LiteTube
                 watchRightActions.Left = Math.Max(435, _watchMetaPanel.Width - watchRightActions.Width - 8);
             };
 
-            // Player Control Bar (Directly below video canvas: Top Full-Width SeekBar + Transport + Quality + Theater/Fullscreen + Audio)
-            _videoBottomBar = new Panel
-            {
-                Dock = DockStyle.Bottom,
-                Height = 52,
-                BackColor = Color.FromArgb(15, 15, 15)
-            };
-
-            // Top Full-Width YouTube Red + Buffer Progress Seek Bar
-            _customSeekBar = new PictureBox
-            {
-                Dock = DockStyle.Top,
-                Height = 14,
-                BackColor = Color.FromArgb(15, 15, 15),
-                Cursor = Cursors.Hand
-            };
-
-            var controlsRow = new Panel
-            {
-                Dock = DockStyle.Fill,
-                BackColor = Color.FromArgb(15, 15, 15)
-            };
-
-            // Left Transport Controls (YouTube 1:1 Frameless with Vector Icons)
-            _btnVidPlayPause = CreateFlatButton("\u25B6", 6, 1, 38, 36, Color.Transparent, 18, Color.Empty);
-            _btnVidPlayPause.Font = new Font("Segoe UI", 12f, FontStyle.Regular);
-            _btnVidPlayPause.ForeColor = Color.White;
-
-            _btnVidNext = CreateFlatButton("\u25B6\u275A", 46, 1, 34, 36, Color.Transparent, 17, Color.Empty);
-            _btnVidNext.Font = new Font("Segoe UI", 9f, FontStyle.Bold);
-            _btnVidNext.ForeColor = Color.White;
-
-            _btnVidBack10 = CreateFlatButton("-10", 82, 1, 32, 36, Color.Transparent, 16, Color.Empty);
-            _btnVidBack10.Font = new Font("Segoe UI Semibold", 8f, FontStyle.Bold);
-            _btnVidBack10.ForeColor = Color.FromArgb(220, 220, 220);
-
-            _btnVidFwd10 = CreateFlatButton("+10", 116, 1, 32, 36, Color.Transparent, 16, Color.Empty);
-            _btnVidFwd10.Font = new Font("Segoe UI Semibold", 8f, FontStyle.Bold);
-            _btnVidFwd10.ForeColor = Color.FromArgb(220, 220, 220);
-
-            _btnVidStop = CreateFlatButton("", 0, 0, 0, 0, Color.Transparent, 0, Color.Empty);
-            _btnVidStop.Visible = false;
-
-            // Independent Video Volume Controls right next to transport (YouTube Desktop White Slider)
-            _btnVidMute = CreateFlatButton("\uE15D", 152, 1, 34, 36, Color.Transparent, 17, Color.Empty);
-            _btnVidMute.Font = new Font("Segoe UI Symbol", 11.5f, FontStyle.Regular);
-            _btnVidMute.ForeColor = Color.White;
-
-            _vidVolCustomBar = new PictureBox
-            {
-                Location = new Point(188, 1),
-                Size = new Size(56, 36),
-                BackColor = Color.FromArgb(15, 15, 15),
-                Cursor = Cursors.Hand
-            };
-
-            _lblVidTimeCombined = new Label
-            {
-                Text = "0:00 / 0:00",
-                ForeColor = Color.White,
-                Font = new Font("Segoe UI Semibold", 8.8f),
-                Location = new Point(248, 8),
-                Size = new Size(125, 20),
-                TextAlign = ContentAlignment.MiddleLeft
-            };
-
-            // Right Player Settings (Quality pills + EQ + Theater Mode + Fullscreen)
-            var rightPlayerControls = new Panel
-            {
-                Dock = DockStyle.Right,
-                Width = 320,
-                BackColor = Color.FromArgb(15, 15, 15)
-            };
-
-            _btnQ360 = CreateFlatButton("360p", 2, 5, 42, 28, Color.Transparent, 14, Color.Empty);
-            _btnQ360.Font = new Font("Segoe UI Semibold", 8.2f, FontStyle.Bold);
-
-            _btnQ480 = CreateFlatButton("480p", 46, 5, 42, 28, Color.Transparent, 14, Color.Empty);
-            _btnQ480.Font = new Font("Segoe UI Semibold", 8.2f, FontStyle.Bold);
-
-            _btnQ720 = CreateFlatButton("720p", 90, 5, 52, 28, Color.Transparent, 14, Color.Empty);
-            _btnQ720.Font = new Font("Segoe UI Semibold", 8.2f, FontStyle.Bold);
-
-            _btnQ1080 = CreateFlatButton("1080p", 144, 5, 60, 28, Color.Transparent, 14, Color.Empty);
-            _btnQ1080.Font = new Font("Segoe UI Semibold", 8.2f, FontStyle.Bold);
-
-            _btnVidAudioDialog = CreateFlatButton("EQ", 208, 1, 34, 36, Color.Transparent, 17, Color.Empty);
-            _btnVidAudioDialog.Font = new Font("Segoe UI Semibold", 8.2f, FontStyle.Bold);
-            _btnVidAudioDialog.ForeColor = Color.FromArgb(220, 220, 220);
-
-            _btnBottomTheater = CreateFlatButton("\u25AD", 244, 1, 34, 36, Color.Transparent, 17, Color.Empty);
-            _btnBottomTheater.Font = new Font("Segoe UI", 12f, FontStyle.Regular);
-            _btnBottomTheater.ForeColor = Color.White;
-
-            _btnBottomFullscreen = CreateFlatButton("\u26F6", 280, 1, 34, 36, Color.Transparent, 17, Color.Empty);
-            _btnBottomFullscreen.Font = new Font("Segoe UI Symbol", 12f, FontStyle.Regular);
-            _btnBottomFullscreen.ForeColor = Color.White;
-
-            rightPlayerControls.Controls.AddRange(new Control[]
-            {
-                _btnQ360, _btnQ480, _btnQ720, _btnQ1080, _btnVidAudioDialog, _btnBottomTheater, _btnBottomFullscreen
-            });
-
-            controlsRow.Controls.AddRange(new Control[]
-            {
-                _btnVidPlayPause, _btnVidNext, _btnVidBack10, _btnVidFwd10,
-                _btnVidMute, _vidVolCustomBar,
-                _lblVidTimeCombined, rightPlayerControls
-            });
-
-            var playerToolTips = new ToolTip();
-            playerToolTips.SetToolTip(_btnVidPlayPause, "Reproduzir / Pausar (k)");
-            playerToolTips.SetToolTip(_btnVidNext, "Próximo vídeo (Shift+N)");
-            playerToolTips.SetToolTip(_btnVidBack10, "Voltar 10 segundos (j / ←)");
-            playerToolTips.SetToolTip(_btnVidFwd10, "Avançar 10 segundos (l / →)");
-            playerToolTips.SetToolTip(_btnVidMute, "Ativar / Desativar som (m)");
-            playerToolTips.SetToolTip(_vidVolCustomBar, "Volume do vídeo (Roda do mouse)");
-            playerToolTips.SetToolTip(_btnVidAudioDialog, "Equalizador de Áudio e Ganho");
-            playerToolTips.SetToolTip(_btnBottomTheater, "Modo Teatro (t)");
-            playerToolTips.SetToolTip(_btnBottomFullscreen, "Tela Inteira (f)");
-            playerToolTips.SetToolTip(_btnQ360, "Qualidade 360p");
-            playerToolTips.SetToolTip(_btnQ480, "Qualidade 480p");
-            playerToolTips.SetToolTip(_btnQ720, "Qualidade 720p HD");
-            playerToolTips.SetToolTip(_btnQ1080, "Qualidade 1080p Full HD");
-
-            _videoBottomBar.Controls.Add(controlsRow);
-            _videoBottomBar.Controls.Add(_customSeekBar);
-
             _videoCanvasContainer = new Panel
             {
                 Dock = DockStyle.Fill,
                 BackColor = Color.Black
             };
 
-            _vlcCanvas = new Panel
+            _flyleafHost = new FlyleafHost
             {
                 Dock = DockStyle.Fill,
-                BackColor = Color.Black
+                BackColor = Color.Black,
+                KeyBindings = false
             };
-            _vlcCanvas.Click += (s, e) => TogglePlayPause();
-            _vlcCanvas.DoubleClick += (s, e) => ToggleFullscreen(!_isFullscreen);
-            _vlcCanvas.MouseMove += (s, e) =>
-            {
-                _lastMouseActivityUtc = DateTime.UtcNow;
-                if (_isFullscreen && !_videoBottomBar.Visible)
-                {
-                    _videoBottomBar.Visible = true;
-                }
-            };
-            _vlcCanvas.HandleCreated += (s, e) => EnsureVlcPlayer();
+
+            InitializeFlyleafPlayer();
+
+            _wpfOverlay = new WpfVideoPlayerOverlay(_videoCanvasContainer, _parentForm);
 
             _loadingOverlay = new Panel
             {
@@ -684,7 +530,7 @@ namespace LiteTube
 
             _lblLoadingTitle = new Label
             {
-                Text = "Iniciando streaming LibVLC...",
+                Text = "Iniciando streaming FlyleafLib...",
                 Font = new Font("Segoe UI Semibold", 10f, FontStyle.Bold),
                 ForeColor = TextPrimary,
                 Location = new Point(16, 14),
@@ -708,11 +554,13 @@ namespace LiteTube
             _loadingOverlay.Controls.AddRange(new Control[] { _lblLoadingTitle, _lblLoadingProgress, _btnCancelLoad });
 
             _videoCanvasContainer.Controls.Add(_loadingOverlay);
-            _videoCanvasContainer.Controls.Add(_vlcCanvas);
-            _videoCanvasContainer.Resize += (s, e) => CenterLoadingOverlay();
+            _videoCanvasContainer.Controls.Add(_flyleafHost);
+            _videoCanvasContainer.Resize += (s, e) =>
+            {
+                CenterLoadingOverlay();
+            };
 
             _playerStagePanel.Controls.Add(_videoCanvasContainer);
-            _playerStagePanel.Controls.Add(_videoBottomBar);
             _playerStagePanel.Controls.Add(_watchMetaPanel);
 
             _watchPagePanel.Controls.Add(_playerStagePanel);
@@ -724,6 +572,32 @@ namespace LiteTube
 
             Controls.Add(_mainContentPanel);
             Controls.Add(_sidebar);
+
+            WireWpfOverlayEvents();
+
+            _watchPagePanel.VisibleChanged += (s, e) =>
+            {
+                if (!_watchPagePanel.Visible && _wpfOverlay != null)
+                {
+                    _wpfOverlay.SetOverlayActive(false);
+                }
+                else if (_watchPagePanel.Visible && _wpfOverlay != null)
+                {
+                    _wpfOverlay.SetOverlayActive(true);
+                }
+            };
+
+            VisibleChanged += (s, e) =>
+            {
+                if (!Visible && _wpfOverlay != null)
+                {
+                    _wpfOverlay.SetOverlayActive(false);
+                }
+                else if (Visible && _watchPagePanel != null && _watchPagePanel.Visible && _wpfOverlay != null)
+                {
+                    _wpfOverlay.SetOverlayActive(true);
+                }
+            };
 
             UpdateSavedVideosCount();
         }
@@ -836,26 +710,6 @@ namespace LiteTube
             }
         }
 
-        private void EnsureVlcPlayer()
-        {
-            if (_vlcPlayer == null && _vlcCanvas != null && _vlcCanvas.IsHandleCreated)
-            {
-                _vlcPlayer = new VlcPlayer(_vlcCanvas.Handle);
-                _vlcPlayer.OnEndReached += () => SafeInvoke(() =>
-                {
-                    _isPlaying = false;
-                    UpdatePlayPauseButton();
-                    double tot = TotalVideoDurationSeconds;
-                    if (_lblVidTimeCombined != null && tot > 0)
-                    {
-                        _lblVidTimeCombined.Text = YouTubeService.FormatSeconds(tot) + " / " + YouTubeService.FormatSeconds(tot);
-                    }
-                    if (_customSeekBar != null) _customSeekBar.Invalidate();
-                    EmitStatus("🎬 Fim do vídeo.");
-                });
-            }
-        }
-
         private void CenterLoadingOverlay()
         {
             if (_loadingOverlay != null && _videoCanvasContainer != null)
@@ -863,6 +717,165 @@ namespace LiteTube
                 _loadingOverlay.Left = Math.Max(10, (_videoCanvasContainer.Width - _loadingOverlay.Width) / 2);
                 _loadingOverlay.Top = Math.Max(10, (_videoCanvasContainer.Height - _loadingOverlay.Height) / 2);
             }
+        }
+
+        private void InitializeFlyleafPlayer()
+        {
+            try
+            {
+                _playerConfig = new Config();
+                _playerConfig.Video.VideoAcceleration = true;
+                _playerConfig.Player.SeekAccurate = true;
+                _playerConfig.Player.AutoPlay = true;
+
+                // Buffer Dinâmico e Estabilidade FlyleafLib
+                _playerConfig.Demuxer.BufferDuration = 30 * 1000 * 10000L; // 30s de buffer à frente
+                _playerConfig.Player.MinBufferDuration = 1500 * 10000L;    // 1.5s buffer mínimo para iniciar reprodução sem congelamento
+                _playerConfig.Demuxer.BufferPackets = 5000;
+                _playerConfig.Demuxer.MaxAudioPackets = 5000;
+                _playerConfig.Demuxer.IOStreamBufferSize = 2 * 1024 * 1024;
+                _playerConfig.Demuxer.OpenTimeout = 15 * 1000 * 10000L;
+                _playerConfig.Demuxer.ReadTimeout = 20 * 1000 * 10000L;
+                _playerConfig.Demuxer.SeekTimeout = 15 * 1000 * 10000L;
+
+                string ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+                _playerConfig.Demuxer.FormatOpt["user_agent"] = ua;
+                _playerConfig.Demuxer.FormatOpt["headers"] = "User-Agent: " + ua + "\r\n";
+                _playerConfig.Demuxer.FormatOpt["buffer_size"] = "4194304";
+                _playerConfig.Demuxer.FormatOpt["reconnect"] = "1";
+                _playerConfig.Demuxer.FormatOpt["reconnect_streamed"] = "1";
+                _playerConfig.Demuxer.FormatOpt["reconnect_delay_max"] = "5";
+
+                _playerConfig.Demuxer.AudioFormatOpt["user_agent"] = ua;
+                _playerConfig.Demuxer.AudioFormatOpt["headers"] = "User-Agent: " + ua + "\r\n";
+                _playerConfig.Demuxer.AudioFormatOpt["buffer_size"] = "1048576";
+                _playerConfig.Demuxer.AudioFormatOpt["reconnect"] = "1";
+                _playerConfig.Demuxer.AudioFormatOpt["reconnect_streamed"] = "1";
+                _playerConfig.Demuxer.AudioFormatOpt["reconnect_delay_max"] = "5";
+
+                _player = new Player(_playerConfig);
+                _flyleafHost.Player = _player;
+
+                _player.PlaybackStopped += OnPlayerPlaybackStopped;
+                _player.OpenCompleted += OnPlayerOpenCompleted;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error("FLYLEAF", "Erro ao inicializar FlyleafHost/Player: " + ex.Message);
+            }
+        }
+
+        private void OnPlayerOpenCompleted(object sender, OpenCompletedArgs e)
+        {
+            SafeInvoke(() =>
+            {
+                _isPlaying = _player != null && _player.IsPlaying;
+                UpdatePlayPauseButton();
+
+                if (_player != null && _player.Video != null && !string.IsNullOrEmpty(_player.Video.Codec))
+                {
+                    string hw = _player.Video.VideoAcceleration ? "HW D3D11" : "SW";
+                    string vCodec = _player.Video.Codec.ToUpperInvariant();
+                    string aCodec = (_player.Audio != null && !string.IsNullOrEmpty(_player.Audio.Codec))
+                        ? _player.Audio.Codec.ToUpperInvariant()
+                        : "AUDIO";
+                    string runtimeCodec = string.Format("{0}/{1} ({2})", vCodec, aCodec, hw);
+                    _lblBufferBadge.Text = string.Format("▶ Flyleaf D3D11 ({0})", runtimeCodec);
+                    _lblVideoSubInfo.Text = string.Format("Qualidade {0}p ({1})  •  Flyleaf Direct3D 11  •  Volume: {2}%",
+                        _config.VideoQualityHeight, runtimeCodec, (int)Math.Round(_config.VideoVolume * 100));
+
+                    Logger.Info("FLYLEAF", string.Format("Fluxo aberto e validado pelo FFmpeg: Res={0}x{1}, Codec={2}, PixelFormat={3}, AceleraçãoHW={4}",
+                        _player.Video.Width, _player.Video.Height, runtimeCodec, _player.Video.PixelFormat, _player.Video.VideoAcceleration));
+                }
+
+                if (_wpfOverlay != null)
+                {
+                    _wpfOverlay.UpdatePlaybackState(_isPlaying, CurrentVideoPositionSeconds, BufferedVideoDurationSeconds, TotalVideoDurationSeconds);
+                }
+            });
+        }
+
+        private void OnPlayerPlaybackStopped(object sender, PlaybackStoppedArgs e)
+        {
+            SafeInvoke(() =>
+            {
+                if (_isSwitchingQuality) return;
+
+                if (_player != null && _player.Status == Status.Ended)
+                {
+                    Logger.Info("FLYLEAF", "Fim do vídeo alcançado sem cortes prematuros.");
+                    _isPlaying = false;
+                    UpdatePlayPauseButton();
+                    EmitStatus("🎬 Fim do vídeo.");
+                    PlayNextVideo();
+                }
+            });
+        }
+
+        private async Task PlayStreamAsync(string videoUrl, string audioUrl, double durationSeconds, double startSeconds = 0.0)
+        {
+            if (_player == null) return;
+
+            await Task.Run(() =>
+            {
+                try
+                {
+                    _player.Stop();
+
+                    // 1. Abre a faixa de vídeo principal
+                    _player.Open(videoUrl);
+
+                    // 2. Acopla a faixa de áudio externa diretamente pelo motor FFmpeg com sincronização de PTS
+                    if (!string.IsNullOrEmpty(audioUrl) && !string.Equals(videoUrl, audioUrl, StringComparison.OrdinalIgnoreCase))
+                    {
+                        var extAudio = new ExternalAudioStream
+                        {
+                            Url = audioUrl,
+                            UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                        };
+                        _player.Open(extAudio, resync: true, defaultAudio: true);
+                    }
+
+                    if (startSeconds > 0.0)
+                    {
+                        _player.SeekAccurate((int)(startSeconds * 1000.0));
+                    }
+
+                    _player.Play();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error("FLYLEAF", "Erro ao abrir fluxos de reprodução: " + ex.Message);
+                }
+            });
+        }
+
+        private void WireWpfOverlayEvents()
+        {
+            if (_wpfOverlay == null) return;
+
+            _wpfOverlay.PlayPauseRequested += () => SafeInvoke(() => TogglePlayPause());
+            _wpfOverlay.NextVideoRequested += () => SafeInvoke(() => PlayNextVideo());
+            _wpfOverlay.OnUserSeekCommitted += targetSec => SafeInvoke(() => SeekToSeconds(targetSec));
+            _wpfOverlay.SeekRequested += targetSec => SafeInvoke(() => SeekToSeconds(targetSec));
+            _wpfOverlay.MuteToggleRequested += () => SafeInvoke(() => ToggleVideoMute());
+            _wpfOverlay.VolumeChanged += vol0To1 => SafeInvoke(() =>
+            {
+                _config.VideoVolume = Math.Max(0.0, Math.Min(1.0, Math.Round(vol0To1, 2)));
+                if (_config.VideoVolume > 0 && _config.IsVideoMuted) _config.IsVideoMuted = false;
+                ApplyVideoAudioSettings();
+                _config.Save();
+            });
+            _wpfOverlay.QualityChanged += q => SafeInvoke(() => ChangeVideoQuality(q));
+            _wpfOverlay.SpeedChanged += spd => SafeInvoke(() =>
+            {
+                if (_player != null) _player.Speed = spd;
+                EmitStatus(string.Format("⚡ Velocidade do vídeo: {0:0.00}x", spd));
+            });
+            _wpfOverlay.TheaterToggleRequested += () => SafeInvoke(() => ToggleTheaterMode(!_isTheaterMode));
+            _wpfOverlay.FullscreenToggleRequested += () => SafeInvoke(() => ToggleFullscreen(!_isFullscreen));
+            _wpfOverlay.AudioDialogRequested += () => SafeInvoke(() => ShowVideoAudioRegulatorDialog());
+            _wpfOverlay.ShortcutKeyPressed += key => SafeInvoke(() => HandleShortcutKey(key));
         }
 
         private void WireEvents()
@@ -908,15 +921,6 @@ namespace LiteTube
             _btnSaveVideo.Click += (s, e) => { if (_currentVideo != null) ToggleSaveVideo(_currentVideo); };
             _btnBackToCatalogFromWatch.Click += (s, e) => ReturnToCatalog();
 
-            // Quality & Theater/Fullscreen Buttons
-            _btnQ360.Click += (s, e) => ChangeVideoQuality(360);
-            _btnQ480.Click += (s, e) => ChangeVideoQuality(480);
-            _btnQ720.Click += (s, e) => ChangeVideoQuality(720);
-            _btnQ1080.Click += (s, e) => ChangeVideoQuality(1080);
-
-            _btnBottomTheater.Click += (s, e) => ToggleTheaterMode(!_isTheaterMode);
-            _btnBottomFullscreen.Click += (s, e) => ToggleFullscreen(!_isFullscreen);
-
             _btnCancelLoad.Click += (s, e) =>
             {
                 StopProgressiveSession();
@@ -925,81 +929,6 @@ namespace LiteTube
                 UpdatePlayPauseButton();
                 EmitStatus("Carregamento do vídeo cancelado.");
             };
-
-            // Transport Controls
-            _btnVidPlayPause.Click += (s, e) => TogglePlayPause();
-            _btnVidNext.Click += (s, e) => PlayNextVideo();
-            _btnVidBack10.Click += (s, e) => SeekRelative(-10.0);
-            _btnVidFwd10.Click += (s, e) => SeekRelative(10.0);
-            _btnVidStop.Click += (s, e) => StopVideo();
-
-            // Custom Dual Seek/Buffer Bar
-            _customSeekBar.Paint += OnPaintCustomSeekBar;
-            _customSeekBar.MouseEnter += (s, e) => { _isHoveringSeek = true; _customSeekBar.Invalidate(); };
-            _customSeekBar.MouseLeave += (s, e) => { _isHoveringSeek = false; _hoverSeekMouseX = -1; _customSeekBar.Invalidate(); };
-            _customSeekBar.MouseDown += (s, e) =>
-            {
-                _isDraggingSeek = true;
-                double tot = TotalVideoDurationSeconds;
-                if (tot > 0)
-                {
-                    double ratio = Math.Max(0.0, Math.Min(1.0, (double)e.X / Math.Max(1, _customSeekBar.Width)));
-                    _dragScrubSeconds = ratio * tot;
-                    _customSeekBar.Invalidate();
-                }
-            };
-            _customSeekBar.MouseMove += (s, e) =>
-            {
-                _lastMouseActivityUtc = DateTime.UtcNow;
-                _hoverSeekMouseX = e.X;
-                double tot = TotalVideoDurationSeconds;
-                if (_isDraggingSeek)
-                {
-                    if (tot > 0)
-                    {
-                        double ratio = Math.Max(0.0, Math.Min(1.0, (double)e.X / Math.Max(1, _customSeekBar.Width)));
-                        _dragScrubSeconds = ratio * tot;
-                        _lblVidTimeCombined.Text = YouTubeService.FormatSeconds(_dragScrubSeconds) + " / " + YouTubeService.FormatSeconds(tot);
-                    }
-                }
-                _customSeekBar.Invalidate();
-            };
-            _customSeekBar.MouseUp += (s, e) =>
-            {
-                if (_isDraggingSeek)
-                {
-                    _isDraggingSeek = false;
-                    SeekToSeconds(_dragScrubSeconds);
-                }
-            };
-
-            // Independent Video Audio Regulator
-            _btnVidMute.Click += (s, e) => ToggleVideoMute();
-            _btnVidAudioDialog.Click += (s, e) => ShowVideoAudioRegulatorDialog();
-
-            _vidVolCustomBar.Paint += OnPaintVideoVolumeBar;
-            _vidVolCustomBar.MouseEnter += (s, e) => { _isHoveringVolBar = true; _vidVolCustomBar.Invalidate(); };
-            _vidVolCustomBar.MouseLeave += (s, e) => { _isHoveringVolBar = false; _vidVolCustomBar.Invalidate(); };
-            _vidVolCustomBar.MouseDown += (s, e) =>
-            {
-                _isDraggingVolBar = true;
-                SetVideoVolumeFromBarMouse(e.X);
-            };
-            _vidVolCustomBar.MouseMove += (s, e) =>
-            {
-                if (_isDraggingVolBar) SetVideoVolumeFromBarMouse(e.X);
-            };
-            _vidVolCustomBar.MouseUp += (s, e) =>
-            {
-                if (_isDraggingVolBar)
-                {
-                    _isDraggingVolBar = false;
-                    _config.Save();
-                }
-            };
-
-            _videoBottomBar.MouseWheel += OnVideoVolumeMouseWheel;
-            _vidVolCustomBar.MouseWheel += OnVideoVolumeMouseWheel;
         }
 
         private void HandleCardActivated(TrackItem item)
@@ -1298,6 +1227,7 @@ namespace LiteTube
             ThumbnailCache.IsVisibleCheck = (id) => _catalogGridCards.IsItemVisible(id);
 
             UpdateChipButtonsUI();
+            if (_wpfOverlay != null) _wpfOverlay.SetOverlayActive(false);
             _watchPagePanel.Visible = false;
             _catalogPanel.Visible = true;
             _catalogPanel.BringToFront();
@@ -1457,6 +1387,7 @@ namespace LiteTube
             _isChannelView = false;
             _channelBannerPanel.Visible = false;
             _btnImportOpenedPlaylist.Visible = false;
+            if (_wpfOverlay != null) _wpfOverlay.SetOverlayActive(false);
             _watchPagePanel.Visible = false;
             _catalogPanel.Visible = true;
             _catalogPanel.BringToFront();
@@ -1685,6 +1616,7 @@ namespace LiteTube
 
             if (_watchPagePanel != null && _watchPagePanel.Visible)
             {
+                if (_wpfOverlay != null) _wpfOverlay.SetOverlayActive(false);
                 StopVideo();
                 if (_relatedRowCards != null) _relatedRowCards.ClearItems(false);
             }
@@ -1694,6 +1626,8 @@ namespace LiteTube
             _isSavedVideosView = false;
             _channelBannerPanel.Visible = false;
 
+            if (_wpfOverlay != null) _wpfOverlay.SetOverlayActive(false);
+            if (_wpfOverlay != null) _wpfOverlay.SetOverlayActive(false);
             _catalogPanel.Visible = true;
             _watchPagePanel.Visible = false;
             _catalogPanel.BringToFront();
@@ -1948,7 +1882,9 @@ namespace LiteTube
 
         private void ReturnToCatalog()
         {
-            // 1. Para o player VLC e finaliza streaming
+            if (_wpfOverlay != null) _wpfOverlay.SetOverlayActive(false);
+
+            // 1. Para o player e finaliza streaming
             StopVideo();
 
             // 2. Limpa completamente os cards de recomendação e miniaturas da barra lateral
@@ -1969,6 +1905,7 @@ namespace LiteTube
             }
             _currentSponsorSegments = new List<SponsorSegment>();
             _lastSkippedSponsorUuid = null;
+            if (_wpfOverlay != null) _wpfOverlay.SetSponsorSegments(_currentSponsorSegments);
 
             // 4. Alterna visibilidade para o catálogo
             _watchPagePanel.Visible = false;
@@ -2008,6 +1945,13 @@ namespace LiteTube
             _sidebar.Visible = !_isFullscreen && !_isTheaterMode;
             UpdateSidebarSelection();
 
+            if (_wpfOverlay != null)
+            {
+                _wpfOverlay.UpdateAudioVisuals(_config.VideoVolume, _config.IsVideoMuted);
+                _wpfOverlay.UpdateQualityAndSpeedVisuals(_config.VideoQualityHeight, _player != null ? _player.Speed : 1.0);
+                _wpfOverlay.SetOverlayActive(true);
+            }
+
             ThumbnailCache.ClearMemoryCache();
             ThumbnailCache.IsVisibleCheck = (id) => _relatedRowCards.IsItemVisible(id);
             _relatedRowCards.PruneOffscreenResources();
@@ -2017,6 +1961,7 @@ namespace LiteTube
 
         public void SuspendForBackground()
         {
+            if (_wpfOverlay != null) _wpfOverlay.SetOverlayActive(false);
             PauseIfPlaying();
 
             if (_catalogGridCards != null && !_catalogGridCards.IsSuspended)
@@ -2047,11 +1992,13 @@ namespace LiteTube
                 {
                     _relatedRowCards.ResumeAndAttach();
                 }
+                if (_wpfOverlay != null) _wpfOverlay.SetOverlayActive(true);
                 ThumbnailCache.IsVisibleCheck = (id) => _relatedRowCards.IsItemVisible(id);
                 _relatedRowCards.PruneOffscreenResources();
             }
             else
             {
+                if (_wpfOverlay != null) _wpfOverlay.SetOverlayActive(false);
                 if (_catalogGridCards != null && _catalogGridCards.IsSuspended)
                 {
                     _catalogGridCards.ResumeAndAttach();
@@ -2061,20 +2008,6 @@ namespace LiteTube
             }
 
             UpdateVideoAudioUI();
-        }
-
-        public void ActivateThumbnailVisibilityCheck()
-        {
-            if (_watchPagePanel != null && _watchPagePanel.Visible)
-            {
-                ThumbnailCache.IsVisibleCheck = (id) => _relatedRowCards.IsItemVisible(id);
-                _relatedRowCards.PruneOffscreenResources();
-            }
-            else
-            {
-                ThumbnailCache.IsVisibleCheck = (id) => _catalogGridCards.IsItemVisible(id);
-                _catalogGridCards.PruneOffscreenResources();
-            }
         }
 
         public void SetSearchResults(SearchResultPage page, string queryLabel)
@@ -2088,6 +2021,7 @@ namespace LiteTube
             _channelBannerPanel.Visible = false;
             _activeSearchChip = "all";
 
+            if (_wpfOverlay != null) _wpfOverlay.SetOverlayActive(false);
             _catalogPanel.Visible = true;
             _watchPagePanel.Visible = false;
             _catalogPanel.BringToFront();
@@ -2182,7 +2116,11 @@ namespace LiteTube
             _currentVideo = video;
             _currentSponsorSegments = new List<SponsorSegment>();
             _lastSkippedSponsorUuid = null;
-            _customSeekBar.Invalidate();
+            if (_wpfOverlay != null)
+            {
+                _wpfOverlay.SetSponsorSegments(_currentSponsorSegments);
+                _wpfOverlay.UpdatePlaybackState(false, 0.0, 0.0, video.DurationSeconds);
+            }
             _catalogGridCards.PlayingVideoId = video.Id;
             _relatedRowCards.PlayingVideoId = video.Id;
 
@@ -2195,10 +2133,9 @@ namespace LiteTube
                 LoadRelatedVideosForPlayingVideoAsync(video.Id);
             }
 
-            EnsureVlcPlayer();
-            if (_vlcPlayer != null)
+            if (_player != null)
             {
-                _vlcPlayer.Stop();
+                _player.Stop();
             }
 
             _isPlaying = false;
@@ -2214,7 +2151,7 @@ namespace LiteTube
 
             CenterLoadingOverlay();
             _lblLoadingTitle.Text = video.Title;
-            _lblLoadingProgress.Text = "Conectando ao YouTube (Modo LibVLC Direct3D)...";
+            _lblLoadingProgress.Text = "Conectando ao YouTube (FlyleafLib Direct3D 11)...";
             _loadingOverlay.Visible = true;
             _loadingOverlay.BringToFront();
 
@@ -2248,16 +2185,15 @@ namespace LiteTube
                 string aUrl = streamUrls.Length > 1 ? streamUrls[1] : null;
                 string codec = streamUrls.Length > 2 ? streamUrls[2] : "Direct";
 
-                EnsureVlcPlayer();
                 ApplyVideoAudioSettings();
-                _vlcPlayer.PlayStream(vUrl, aUrl, video.DurationSeconds, 0.0);
+                await PlayStreamAsync(vUrl, aUrl, video.DurationSeconds, 0.0);
 
                 _isPlaying = true;
                 UpdatePlayPauseButton();
-                _lblBufferBadge.Text = string.Format("▶ LibVLC Direct3D ({0})", codec);
-                _lblVideoSubInfo.Text = string.Format("Qualidade {0}p ({1})  •  Motor LibVLC Direct3D  •  Volume: {2}%",
+                _lblBufferBadge.Text = string.Format("▶ Flyleaf D3D11 ({0})", codec);
+                _lblVideoSubInfo.Text = string.Format("Qualidade {0}p ({1})  •  Flyleaf Direct3D 11  •  Volume: {2}%",
                     _config.VideoQualityHeight, codec, (int)Math.Round(_config.VideoVolume * 100));
-                EmitStatus(string.Format("▶ Assistindo ({0}p • LibVLC): {1}", _config.VideoQualityHeight, video.Title));
+                EmitStatus(string.Format("▶ Assistindo ({0}p • Flyleaf): {1}", _config.VideoQualityHeight, video.Title));
 
                 if (_config.EnableSponsorBlock)
                 {
@@ -2265,13 +2201,16 @@ namespace LiteTube
                     {
                         try
                         {
-                            var segs = await SponsorBlockService.GetSegmentsAsync(video.Id);
+                            var segs = await SponsorBlockService.GetVideoSegmentsAsync(video.Id);
                             SafeInvoke(() =>
                             {
                                 if (_currentVideo != null && _currentVideo.Id == video.Id && segs != null)
                                 {
                                     _currentSponsorSegments = segs;
-                                    _customSeekBar.Invalidate();
+                                    if (_wpfOverlay != null)
+                                    {
+                                        _wpfOverlay.SetSponsorSegments(_currentSponsorSegments);
+                                    }
                                     if (_currentSponsorSegments.Count > 0)
                                     {
                                         _lblBufferBadge.Text = string.Format("🛡️ {0} trecho(s) mapeados (SponsorBlock)", _currentSponsorSegments.Count);
@@ -2326,7 +2265,7 @@ namespace LiteTube
         }
 
         // ====================================================================
-        // THEATER MODE, FULLSCREEN MODE & KEYBOARD SHORTCUTS
+        // THEATER MODE, FULLSCREEN & SHORTCUTS
         // ====================================================================
 
         public void ToggleTheaterMode(bool enableTheater)
@@ -2340,8 +2279,7 @@ namespace LiteTube
             _rightRelatedPanel.Visible = !_isTheaterMode && !_isFullscreen;
             _sidebar.Visible = !_isTheaterMode && !_isFullscreen;
 
-            _btnBottomTheater.Text = _isTheaterMode ? "\u25A3" : "\u25AD";
-            _btnBottomTheater.BackColor = Color.Transparent;
+            if (_wpfOverlay != null) _wpfOverlay.SyncOverlayBounds();
 
             EmitStatus(_isTheaterMode
                 ? "🎬 Modo Teatro ativado (barra lateral oculta). Pressione 'T' para restaurar."
@@ -2351,6 +2289,7 @@ namespace LiteTube
         public void ToggleFullscreen(bool enableFullscreen)
         {
             if (_isFullscreen == enableFullscreen) return;
+
             _isFullscreen = enableFullscreen;
             _lastMouseActivityUtc = DateTime.UtcNow;
 
@@ -2368,10 +2307,6 @@ namespace LiteTube
                 _rightRelatedPanel.Visible = false;
                 _watchMetaPanel.Visible = false;
                 _playerStagePanel.Padding = Padding.Empty;
-                _videoBottomBar.Visible = true;
-
-                _btnBottomFullscreen.Text = "\u2922";
-                _btnBottomFullscreen.BackColor = Color.Transparent;
 
                 if (_parentForm.WindowState == FormWindowState.Maximized)
                 {
@@ -2387,15 +2322,12 @@ namespace LiteTube
 
                 _playerStagePanel.Padding = new Padding(14, 6, 8, 8);
                 _watchMetaPanel.Visible = true;
-                _videoBottomBar.Visible = true;
                 _sidebar.Visible = !_isTheaterMode;
                 _rightRelatedPanel.Visible = !_isTheaterMode;
-
-                _btnBottomFullscreen.Text = "\u26F6";
-                _btnBottomFullscreen.BackColor = Color.Transparent;
             }
 
             if (FullscreenChanged != null) FullscreenChanged(_isFullscreen);
+            if (_wpfOverlay != null) _wpfOverlay.SyncOverlayBounds();
         }
 
         public bool HandleShortcutKey(Keys keyCode)
@@ -2567,47 +2499,34 @@ namespace LiteTube
         public void TogglePlayPause()
         {
             if (_isLoading) return;
-            if (_currentVideo == null) return;
+            if (_currentVideo == null || _player == null) return;
 
             try
             {
-                EnsureVlcPlayer();
-                if (_vlcPlayer != null && _vlcPlayer.HasEnded)
+                if (_config.AutoPauseMusicWhenVideoPlays && _musicEngine != null && _musicEngine.IsPlaying)
                 {
-                    if (_config.AutoPauseMusicWhenVideoPlays && _musicEngine != null && _musicEngine.IsPlaying)
-                    {
-                        _musicEngine.PauseIfPlaying();
-                    }
-                    ApplyVideoAudioSettings();
-                    _vlcPlayer.Play();
-                    _isPlaying = true;
-                    _lastMouseActivityUtc = DateTime.UtcNow;
-                    UpdatePlayPauseButton();
-                    _customSeekBar.Invalidate();
-                    EmitStatus("▶ Reiniciando: " + _currentVideo.Title);
-                    return;
+                    _musicEngine.PauseIfPlaying();
                 }
 
-                if (_isPlaying)
+                if (_player.IsPlaying)
                 {
-                    if (_vlcPlayer != null) _vlcPlayer.Pause();
-                    _isPlaying = false;
-                    _videoBottomBar.Visible = true;
-                    EmitStatus("⏸ Vídeo pausado: " + _currentVideo.Title);
+                    _player.Pause();
                 }
                 else
                 {
-                    if (_config.AutoPauseMusicWhenVideoPlays && _musicEngine != null && _musicEngine.IsPlaying)
+                    if (_player.Status == Status.Ended)
                     {
-                        _musicEngine.PauseIfPlaying();
+                        _player.SeekAccurate(0);
                     }
-                    ApplyVideoAudioSettings();
-                    if (_vlcPlayer != null) _vlcPlayer.Play();
-                    _isPlaying = true;
-                    _lastMouseActivityUtc = DateTime.UtcNow;
-                    EmitStatus("▶ Assistindo: " + _currentVideo.Title);
+                    _player.Play();
                 }
+                _isPlaying = _player.IsPlaying;
+                _lastMouseActivityUtc = DateTime.UtcNow;
                 UpdatePlayPauseButton();
+
+                EmitStatus(_isPlaying
+                    ? "▶ Assistindo: " + _currentVideo.Title
+                    : "⏸ Vídeo pausado: " + _currentVideo.Title);
             }
             catch { }
         }
@@ -2617,23 +2536,49 @@ namespace LiteTube
             StopProgressiveSession();
             try
             {
-                if (_vlcPlayer != null) _vlcPlayer.Stop();
+                if (_player != null) _player.Stop();
             }
             catch { }
             _isPlaying = false;
             _isLoading = false;
             _loadingOverlay.Visible = false;
-            _videoBottomBar.Visible = true;
             UpdatePlayPauseButton();
+        }
+
+        public void ShutdownOverlay()
+        {
+            StopVideo();
+            try
+            {
+                if (_player != null)
+                {
+                    _player.PlaybackStopped -= OnPlayerPlaybackStopped;
+                    _player.OpenCompleted -= OnPlayerOpenCompleted;
+                    _player.Stop();
+                    _player.Dispose();
+                    _player = null;
+                }
+                if (_flyleafHost != null)
+                {
+                    _flyleafHost.Dispose();
+                    _flyleafHost = null;
+                }
+                if (_wpfOverlay != null)
+                {
+                    _wpfOverlay.Dispose();
+                    _wpfOverlay = null;
+                }
+            }
+            catch { }
         }
 
         public void PauseIfPlaying()
         {
-            if (_isPlaying)
+            if (_isPlaying && _player != null)
             {
                 try
                 {
-                    if (_vlcPlayer != null) _vlcPlayer.Pause();
+                    _player.Pause();
                     _isPlaying = false;
                     UpdatePlayPauseButton();
                 }
@@ -2641,38 +2586,136 @@ namespace LiteTube
             }
         }
 
-        private void ChangeVideoQuality(int newHeight)
+        private async void ChangeVideoQuality(int targetHeight)
         {
-            if (_config.VideoQualityHeight == newHeight) return;
-            _config.VideoQualityHeight = newHeight;
+            if (_config.VideoQualityHeight == targetHeight || _isSwitchingQuality || _currentVideo == null)
+                return;
+
+            _isSwitchingQuality = true;
+            int previousHeight = _config.VideoQualityHeight;
+            _config.VideoQualityHeight = targetHeight;
             _config.Save();
             UpdateQualityButtons();
 
-            if (_currentVideo != null)
+            string qLabel = targetHeight >= 2160 ? "4K" : string.Format("{0}p", targetHeight);
+            _wpfOverlay?.ShowToast(string.Format("Alternando para {0}...", qLabel));
+
+            try
             {
-                PlayVideo(_currentVideo);
+                string videoId = _currentVideo.Id;
+
+                // 1. O vídeo atual continua tocando a partir do buffer na GPU/RAM.
+                // 2. Resolve dinamicamente as URLs da nova resolução em segundo plano.
+                var (newVideoUrl, newAudioUrl) = await Task.Run(() =>
+                {
+                    return ProgressiveVideoSession.ResolveStreamUrls(videoId, targetHeight, null, _config.BrowserForCookies, _config.CookiesFilePath);
+                });
+
+                if (_currentVideo == null || _currentVideo.Id != videoId)
+                    return;
+
+                if (string.IsNullOrWhiteSpace(newVideoUrl))
+                    throw new InvalidOperationException(string.Format("Não foi possível obter o fluxo para {0}.", qLabel));
+
+                // 3. Captura precisa do timestamp atual da mídia (em ticks)
+                long currentTicks = _player != null ? _player.CurTime : 0;
+                bool wasPlaying = _isPlaying;
+
+                // 4. Efetua a troca atômica sem resetar o marcador de reprodução
+                await SwitchQualityStreamAtomicAsync(newVideoUrl, newAudioUrl, currentTicks, wasPlaying);
+
+                _wpfOverlay?.ShowToast(string.Format("Qualidade: {0}", qLabel));
+                EmitStatus(string.Format("▶ Resolução alternada com sucesso para {0} ({1})", qLabel, _currentVideo.Title));
             }
+            catch (Exception ex)
+            {
+                _config.VideoQualityHeight = previousHeight;
+                UpdateQualityButtons();
+                EmitStatus(string.Format("Erro ao mudar resolução: {0}", ex.Message));
+                _wpfOverlay?.ShowToast(string.Format("Falha ao mudar para {0}", qLabel));
+            }
+            finally
+            {
+                _isSwitchingQuality = false;
+            }
+        }
+
+        private async Task SwitchQualityStreamAtomicAsync(string videoUrl, string audioUrl, long currentTicks, bool wasPlaying)
+        {
+            if (_player == null) return;
+
+            await Task.Run(() =>
+            {
+                try
+                {
+                    _player.Pause();
+
+                    // 1. Abre a nova faixa de vídeo na resolução solicitada
+                    _player.Open(videoUrl);
+
+                    // 2. Acopla o áudio sincronizado se for fluxo separado
+                    if (!string.IsNullOrEmpty(audioUrl) && !string.Equals(videoUrl, audioUrl, StringComparison.OrdinalIgnoreCase))
+                    {
+                        var extAudio = new ExternalAudioStream
+                        {
+                            Url = audioUrl,
+                            UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                        };
+                        _player.Open(extAudio, resync: true, defaultAudio: true);
+                    }
+
+                    // 3. Restaura o marcador de tempo da reprodução sem retroceder ao início
+                    if (currentTicks > 0)
+                    {
+                        int targetMs = (int)(currentTicks / TimeSpan.TicksPerMillisecond);
+                        _player.SeekAccurate(targetMs);
+                    }
+
+                    // 4. Retoma a reprodução contínua caso estivesse tocando
+                    if (wasPlaying)
+                    {
+                        _player.Play();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error("FLYLEAF", "Falha na troca atômica de resolução: " + ex.Message, ex);
+                    throw;
+                }
+            });
+
+            SafeInvoke(() =>
+            {
+                _isPlaying = wasPlaying;
+                UpdatePlayPauseButton();
+
+                if (_player != null && _player.Video != null && !string.IsNullOrEmpty(_player.Video.Codec))
+                {
+                    string hw = _player.Video.VideoAcceleration ? "HW D3D11" : "SW";
+                    string vCodec = _player.Video.Codec.ToUpperInvariant();
+                    string aCodec = (_player.Audio != null && !string.IsNullOrEmpty(_player.Audio.Codec))
+                        ? _player.Audio.Codec.ToUpperInvariant()
+                        : "AUDIO";
+                    string runtimeCodec = string.Format("{0}/{1} ({2})", vCodec, aCodec, hw);
+                    _lblBufferBadge.Text = string.Format("▶ Flyleaf D3D11 ({0})", runtimeCodec);
+                    _lblVideoSubInfo.Text = string.Format("Qualidade {0}p ({1})  •  Flyleaf Direct3D 11  •  Volume: {2}%",
+                        _config.VideoQualityHeight, runtimeCodec, (int)Math.Round(_config.VideoVolume * 100));
+                }
+
+                if (_wpfOverlay != null)
+                {
+                    double curSec = TimeSpan.FromTicks(currentTicks).TotalSeconds;
+                    _wpfOverlay.UpdatePlaybackState(_isPlaying, curSec, BufferedVideoDurationSeconds, TotalVideoDurationSeconds);
+                }
+            });
         }
 
         private void UpdateQualityButtons()
         {
             int q = _config.VideoQualityHeight;
-            StyleQualityBtn(_btnQ360, q == 360);
-            StyleQualityBtn(_btnQ480, q == 480);
-            StyleQualityBtn(_btnQ720, q == 720);
-            StyleQualityBtn(_btnQ1080, q == 1080);
-        }
-
-        private void StyleQualityBtn(Button btn, bool active)
-        {
-            var mb = btn as ModernButton;
-            if (mb != null)
+            if (_wpfOverlay != null)
             {
-                mb.BackColor = active ? Color.FromArgb(240, 240, 240) : Color.Transparent;
-                mb.ForeColor = active ? Color.FromArgb(15, 15, 15) : Color.FromArgb(170, 170, 170);
-                mb.BorderColor = Color.Empty;
-                mb.CornerRadius = 14;
-                mb.Invalidate();
+                _wpfOverlay.UpdateQualityAndSpeedVisuals(q, _player != null ? _player.Speed : 1.0);
             }
         }
 
@@ -2680,8 +2723,7 @@ namespace LiteTube
         {
             get
             {
-                if (_isDraggingSeek) return _dragScrubSeconds;
-                if (_vlcPlayer != null) return _vlcPlayer.CurrentTimeSeconds;
+                if (_player != null && _player.CurTime > 0) return TimeSpan.FromTicks(_player.CurTime).TotalSeconds;
                 return 0.0;
             }
         }
@@ -2690,12 +2732,7 @@ namespace LiteTube
         {
             get
             {
-                if (_activeProgressiveSession != null)
-                {
-                    double frac = _activeProgressiveSession.BufferedFraction;
-                    if (frac > 0 && TotalVideoDurationSeconds > 0)
-                        return frac * TotalVideoDurationSeconds;
-                }
+                if (_player != null && _player.BufferedDuration > 0) return TimeSpan.FromTicks(_player.BufferedDuration).TotalSeconds;
                 return Math.Min(TotalVideoDurationSeconds, CurrentVideoPositionSeconds + 20.0);
             }
         }
@@ -2704,8 +2741,8 @@ namespace LiteTube
         {
             get
             {
-                if (_vlcPlayer != null && _vlcPlayer.DurationSeconds > 0)
-                    return _vlcPlayer.DurationSeconds;
+                if (_player != null && _player.Duration > 0)
+                    return TimeSpan.FromTicks(_player.Duration).TotalSeconds;
                 if (_currentVideo != null && _currentVideo.DurationSeconds > 0)
                     return _currentVideo.DurationSeconds;
                 return 0.0;
@@ -2714,36 +2751,23 @@ namespace LiteTube
 
         public void SeekToSeconds(double seconds)
         {
+            if (_player == null) return;
             try
             {
-                double tot = TotalVideoDurationSeconds;
-                if (tot > 0)
+                double dur = TotalVideoDurationSeconds;
+                if (dur > 0)
                 {
-                    seconds = Math.Max(0.0, Math.Min(tot - 0.5, seconds));
+                    seconds = Math.Max(0.0, Math.Min(dur - 0.2, seconds));
                 }
-
-                Logger.Info("SEEK", string.Format("LibVLC SeekToSeconds solicitado: {0:0.0}s", seconds));
-                EnsureVlcPlayer();
-                if (_vlcPlayer != null)
-                {
-                    bool wasEnded = _vlcPlayer.HasEnded;
-                    _vlcPlayer.Seek(seconds);
-                    if (wasEnded)
-                    {
-                        _isPlaying = true;
-                        UpdatePlayPauseButton();
-                        EmitStatus(string.Format("▶ Retomando ({0}): {1}", YouTubeService.FormatSeconds(seconds), _currentVideo != null ? _currentVideo.Title : ""));
-                    }
-                }
-                if (_lblVidTimeCombined != null && tot > 0)
-                {
-                    _lblVidTimeCombined.Text = YouTubeService.FormatSeconds(seconds) + " / " + YouTubeService.FormatSeconds(tot);
-                }
-                _customSeekBar.Invalidate();
+                int targetMs = (int)Math.Round(seconds * 1000.0);
+                Logger.Info("SEEK", string.Format("Flyleaf SeekAccurate para {0:0.0}s ({1}ms)", seconds, targetMs));
+                _player.SeekAccurate(targetMs);
+                _lastMouseActivityUtc = DateTime.UtcNow;
+                UpdatePlayPauseButton();
             }
             catch (Exception ex)
             {
-                EmitStatus("Erro no seek LibVLC: " + ex.Message);
+                EmitStatus("Erro no seek Flyleaf: " + ex.Message);
             }
         }
 
@@ -2752,156 +2776,44 @@ namespace LiteTube
             SeekToSeconds(CurrentVideoPositionSeconds + deltaSeconds);
         }
 
-        private void SeekFromMouseX(int mouseX)
-        {
-            double tot = TotalVideoDurationSeconds;
-            if (tot <= 0) return;
-            double ratio = Math.Max(0.0, Math.Min(1.0, (double)mouseX / Math.Max(1, _customSeekBar.Width)));
-            SeekToSeconds(ratio * tot);
-        }
-
-        private void OnPaintCustomSeekBar(object sender, PaintEventArgs e)
-        {
-            Graphics g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            int w = _customSeekBar.Width;
-            int h = _customSeekBar.Height;
-
-            g.Clear(Color.FromArgb(15, 15, 15));
-
-            bool isHover = _isHoveringSeek || _isDraggingSeek;
-            int trackH = isHover ? 5 : 3;
-            int trackY = (h - trackH) / 2;
-
-            // 1. Unplayed Track (Neutral dark translucent white/gray)
-            using (var trackBrush = new SolidBrush(Color.FromArgb(70, 255, 255, 255)))
-            {
-                g.FillRectangle(trackBrush, 0, trackY, w, trackH);
-            }
-
-            double tot = TotalVideoDurationSeconds;
-            double cur = CurrentVideoPositionSeconds;
-
-            if (_vlcPlayer != null && _vlcPlayer.HasEnded && tot > 0)
-            {
-                cur = tot;
-            }
-
-            if (tot > 0)
-            {
-                // 2. Buffer Portion (Semi-translucent white)
-                double bufSec = Math.Max(cur, BufferedVideoDurationSeconds);
-                double bufRatio = Math.Max(0.0, Math.Min(1.0, bufSec / tot));
-                int bufW = (int)Math.Round(bufRatio * w);
-                if (bufW > 0)
-                {
-                    using (var bufBrush = new SolidBrush(Color.FromArgb(140, 255, 255, 255)))
-                    {
-                        g.FillRectangle(bufBrush, 0, trackY, bufW, trackH);
-                    }
-                }
-
-                // 3. Hover Ghost Track (YouTube light gray highlight up to cursor)
-                if (isHover && !_isDraggingSeek && _hoverSeekMouseX > 0)
-                {
-                    int hoverW = Math.Min(w, _hoverSeekMouseX);
-                    using (var hoverBrush = new SolidBrush(Color.FromArgb(50, 255, 255, 255)))
-                    {
-                        g.FillRectangle(hoverBrush, 0, trackY, hoverW, trackH);
-                    }
-                }
-
-                // 4. SponsorBlock Segments (Vibrant colored bands on the track)
-                if (_config.EnableSponsorBlock && _currentSponsorSegments != null && _currentSponsorSegments.Count > 0)
-                {
-                    for (int i = 0; i < _currentSponsorSegments.Count; i++)
-                    {
-                        var seg = _currentSponsorSegments[i];
-                        if (seg.EndTime <= seg.StartTime || seg.StartTime >= tot) continue;
-                        int sx = (int)Math.Round((seg.StartTime / tot) * w);
-                        int ex = (int)Math.Round((Math.Min(tot, seg.EndTime) / tot) * w);
-                        int segW = Math.Max(3, ex - sx);
-                        using (var segBrush = new SolidBrush(seg.CategoryColor))
-                        {
-                            g.FillRectangle(segBrush, sx, trackY, segW, trackH);
-                        }
-                    }
-                }
-
-                // 5. Playback Position (Authentic YouTube Pure Red #FF0000)
-                double curRatio = Math.Max(0.0, Math.Min(1.0, cur / tot));
-                int curW = (int)Math.Round(curRatio * w);
-                if (curW > 0)
-                {
-                    using (var redBrush = new SolidBrush(YouTubeRed))
-                    {
-                        g.FillRectangle(redBrush, 0, trackY, curW, trackH);
-                    }
-                }
-
-                // 6. Scrubber Knob (Pure YouTube Red circle #FF0000)
-                if (isHover)
-                {
-                    int knobR = 6;
-                    int cx = Math.Max(knobR, Math.Min(w - knobR, curW));
-                    using (var redBrush = new SolidBrush(YouTubeRed))
-                    {
-                        g.FillEllipse(redBrush, cx - knobR, (h / 2) - knobR, knobR * 2 + 1, knobR * 2 + 1);
-                    }
-                }
-            }
-        }
-
         public void UpdateTimerTick()
         {
-            if (_currentVideo == null) return;
+            if (_currentVideo == null || _player == null || _wpfOverlay == null) return;
 
             double cur = CurrentVideoPositionSeconds;
             double tot = TotalVideoDurationSeconds;
+            double buf = BufferedVideoDurationSeconds;
+            bool playing = _player.IsPlaying;
 
-            if (_vlcPlayer != null && _vlcPlayer.HasEnded && tot > 0)
+            if (_player.Status == Status.Ended && tot > 0)
             {
                 cur = tot;
-                UpdatePlayPauseButton();
             }
 
-            _lblVidTimeCombined.Text = YouTubeService.FormatSeconds(cur) + " / " + YouTubeService.FormatSeconds(tot);
-            _customSeekBar.Invalidate();
+            _wpfOverlay.UpdatePlaybackState(playing, cur, buf, tot);
 
-            // SponsorBlock Automatic Skip
-            if (_config.EnableSponsorBlock && _config.AutoSkipSponsors && _isPlaying && !_isDraggingSeek && _currentSponsorSegments != null && _currentSponsorSegments.Count > 0)
+            // Auto-Skip do SponsorBlock
+            if (_config.EnableSponsorBlock && _config.AutoSkipSponsors && playing && !_wpfOverlay.IsUserDraggingScrubber && _currentSponsorSegments != null && _currentSponsorSegments.Count > 0)
             {
-                for (int i = 0; i < _currentSponsorSegments.Count; i++)
+                double skipTo;
+                SponsorSegment matched;
+                if (SponsorBlockService.CheckAndGetSkipTarget(cur, _currentSponsorSegments, out skipTo, out matched))
                 {
-                    var seg = _currentSponsorSegments[i];
-                    if (seg != null && seg.ActionType == "skip" && cur >= seg.StartTime && cur < seg.EndTime - 0.4)
+                    if (matched != null && _lastSkippedSponsorUuid != matched.UUID)
                     {
-                        if (_lastSkippedSponsorUuid != seg.UUID)
-                        {
-                            _lastSkippedSponsorUuid = seg.UUID;
-                            double targetSec = Math.Min(tot, seg.EndTime + 0.15);
-                            _vlcPlayer.Seek(targetSec);
-                            string msg = string.Format("⏩ [SponsorBlock] {0} pulado ({1:0.0}s -> {2:0.0}s)",
-                                seg.CategoryLabel, seg.StartTime, seg.EndTime);
-                            EmitStatus(msg);
-                            _lblBufferBadge.Text = string.Format("⏩ {0} pulado!", seg.CategoryLabel);
-                            break;
-                        }
+                        _lastSkippedSponsorUuid = matched.UUID;
+                        double targetSec = tot > 0 ? Math.Min(tot, skipTo) : skipTo;
+                        SeekToSeconds(targetSec);
+                        _wpfOverlay.ShowSponsorSkipToast(matched.CategoryLabel);
+                        string msg = string.Format("⏩ [SponsorBlock] {0} pulado ({1:0.0}s -> {2:0.0}s)",
+                            matched.CategoryLabel, matched.Start, matched.End);
+                        EmitStatus(msg);
+                        _lblBufferBadge.Text = string.Format("⏩ {0} pulado!", matched.CategoryLabel);
                     }
                 }
             }
 
-            // Auto-hide bottom bar in Fullscreen after 3.2s of mouse inactivity
-            if (_isPlaying && _isFullscreen && _videoBottomBar.Visible && !_isDraggingSeek && !_isDraggingVolBar)
-            {
-                Point cursorScreen = Cursor.Position;
-                Point cursorClient = _videoBottomBar.PointToClient(cursorScreen);
-                bool hoveringBottomBar = _videoBottomBar.ClientRectangle.Contains(cursorClient);
-                if (!hoveringBottomBar && (DateTime.UtcNow - _lastMouseActivityUtc).TotalSeconds >= 3.2)
-                {
-                    _videoBottomBar.Visible = false;
-                }
-            }
+            _isPlaying = playing;
         }
 
         // ====================================================================
@@ -2912,12 +2824,11 @@ namespace LiteTube
         {
             try
             {
-                if (_vlcPlayer != null)
+                if (_player != null && _player.Audio != null)
                 {
-                    _vlcPlayer.IsMuted = _config.IsVideoMuted;
-                    int targetVol = _config.IsVideoMuted ? 0 : (int)Math.Round(_config.VideoVolume * 100.0);
-                    targetVol = Math.Max(0, Math.Min(100, targetVol));
-                    _vlcPlayer.Volume = targetVol;
+                    int target = (int)Math.Round(Math.Max(0.0, Math.Min(1.0, _config.VideoVolume)) * 100.0);
+                    _player.Audio.Volume = target;
+                    _player.Audio.Mute = _config.IsVideoMuted;
                 }
             }
             catch { }
@@ -2944,77 +2855,12 @@ namespace LiteTube
             EmitStatus(string.Format("🎬 Volume do Vídeo: {0}%", (int)Math.Round(_config.VideoVolume * 100)));
         }
 
-        private void OnVideoVolumeMouseWheel(object sender, MouseEventArgs e)
-        {
-            ChangeVideoVolumeBy(e.Delta > 0 ? 0.05 : -0.05);
-        }
-
-        private void SetVideoVolumeFromBarMouse(int mouseX)
-        {
-            int padX = 5;
-            int trackW = Math.Max(10, _vidVolCustomBar.Width - padX * 2);
-            double ratio = Math.Max(0.0, Math.Min(1.0, (double)(mouseX - padX) / trackW));
-            _config.VideoVolume = Math.Round(ratio, 2);
-            if (_config.VideoVolume > 0 && _config.IsVideoMuted) _config.IsVideoMuted = false;
-            ApplyVideoAudioSettings();
-            _config.Save();
-        }
-
-        private void OnPaintVideoVolumeBar(object sender, PaintEventArgs e)
-        {
-            Graphics g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            int w = _vidVolCustomBar.Width;
-            int h = _vidVolCustomBar.Height;
-
-            g.Clear(Color.FromArgb(15, 15, 15));
-
-            bool isMuted = _config.IsVideoMuted;
-            double vol = isMuted ? 0.0 : Math.Max(0.0, Math.Min(1.0, _config.VideoVolume));
-            bool isHover = _isHoveringVolBar || _isDraggingVolBar;
-
-            int trackH = isHover ? 4 : 3;
-            int padX = 5;
-            int trackW = Math.Max(10, w - padX * 2);
-            int trackY = (h - trackH) / 2;
-
-            // 1. Unfilled track (subtle translucent white/gray)
-            using (var bgBrush = new SolidBrush(Color.FromArgb(80, 255, 255, 255)))
-            {
-                g.FillRectangle(bgBrush, padX, trackY, trackW, trackH);
-            }
-
-            // 2. Filled track (pure white)
-            int fillW = (int)Math.Round(vol * trackW);
-            if (fillW > 0)
-            {
-                using (var fillBrush = new SolidBrush(Color.White))
-                {
-                    g.FillRectangle(fillBrush, padX, trackY, fillW, trackH);
-                }
-            }
-
-            // 3. Thumb Knob (pure white circle)
-            int knobR = isHover ? 6 : 5;
-            int cx = padX + fillW;
-            using (var thumbBrush = new SolidBrush(Color.White))
-            {
-                g.FillEllipse(thumbBrush, cx - knobR, (h / 2) - knobR, knobR * 2 + 1, knobR * 2 + 1);
-            }
-        }
-
         public void UpdateVideoAudioUI()
         {
             int pct = (int)Math.Round(_config.VideoVolume * 100);
-            if (_btnVidMute != null)
+            if (_wpfOverlay != null)
             {
-                string icon = (_config.IsVideoMuted || _config.VideoVolume <= 0.01) ? "\uE198" : "\uE15D";
-                _btnVidMute.Text = icon;
-                _btnVidMute.ForeColor = _config.IsVideoMuted ? Color.FromArgb(170, 170, 170) : Color.White;
-            }
-            if (_vidVolCustomBar != null)
-            {
-                _vidVolCustomBar.Invalidate();
+                _wpfOverlay.UpdateAudioVisuals(_config.VideoVolume, _config.IsVideoMuted);
             }
             if (_currentVideo != null && _lblVideoSubInfo != null)
             {
@@ -3159,7 +3005,7 @@ namespace LiteTube
 
                     lblBalanceTitle.Text = "🎧 Balanço: Centro (L 50% / R 50%)";
 
-                    float currentSpeed = _vlcPlayer != null ? _vlcPlayer.SpeedRatio : 1.0f;
+                    float currentSpeed = (float)(_player != null ? _player.Speed : 1.0);
                     lblSpeedTitle.Text = string.Format("⚡ Velocidade do Vídeo: {0:0.00}x", currentSpeed);
                     int spd = (int)Math.Round(currentSpeed * 100);
                     btnSpd075.BackColor = spd == 75 ? AccentBlue : BgCard;
@@ -3189,11 +3035,11 @@ namespace LiteTube
                 sliderBalance.Scroll += (s, e) => { refreshLabels(); };
                 btnCenterBalance.Click += (s, e) => { sliderBalance.Value = 0; refreshLabels(); };
 
-                btnSpd075.Click += (s, e) => { if (_vlcPlayer != null) _vlcPlayer.SpeedRatio = 0.75f; refreshLabels(); };
-                btnSpd100.Click += (s, e) => { if (_vlcPlayer != null) _vlcPlayer.SpeedRatio = 1.00f; refreshLabels(); };
-                btnSpd125.Click += (s, e) => { if (_vlcPlayer != null) _vlcPlayer.SpeedRatio = 1.25f; refreshLabels(); };
-                btnSpd150.Click += (s, e) => { if (_vlcPlayer != null) _vlcPlayer.SpeedRatio = 1.50f; refreshLabels(); };
-                btnSpd200.Click += (s, e) => { if (_vlcPlayer != null) _vlcPlayer.SpeedRatio = 2.00f; refreshLabels(); };
+                btnSpd075.Click += (s, e) => { if (_player != null) _player.Speed = 0.75; refreshLabels(); };
+                btnSpd100.Click += (s, e) => { if (_player != null) _player.Speed = 1.00; refreshLabels(); };
+                btnSpd125.Click += (s, e) => { if (_player != null) _player.Speed = 1.25; refreshLabels(); };
+                btnSpd150.Click += (s, e) => { if (_player != null) _player.Speed = 1.50; refreshLabels(); };
+                btnSpd200.Click += (s, e) => { if (_player != null) _player.Speed = 2.00; refreshLabels(); };
 
                 chkAutoPauseMusic.CheckedChanged += (s, e) => { _config.AutoPauseMusicWhenVideoPlays = chkAutoPauseMusic.Checked; };
 
@@ -3260,48 +3106,62 @@ namespace LiteTube
                 if (form.ShowDialog(this) == DialogResult.OK && !string.IsNullOrWhiteSpace(txt.Text))
                 {
                     string url = txt.Text.Trim();
-                    Task.Run(async () =>
-                    {
-                        SafeInvoke(() => EmitStatus("Buscando informações do vídeo..."));
-                        var res = await _ytService.FetchUrlOrPlaylistAsync(url, _config, false);
-                        SafeInvoke(() =>
-                        {
-                            if (res.Item1.Count > 0)
-                            {
-                                SetSearchResults(res.Item1, "Link Direto");
-                                PlayVideo(res.Item1[0]);
-                            }
-                            else
-                            {
-                                MessageBox.Show(this, "Não foi possível carregar o vídeo desse link.", "Abrir Vídeo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                            }
-                        });
-                    });
+                    PlayUrlOrPlaylist(url);
                 }
             }
         }
 
+        public void UpdatePlayingVideoMetadata(string title, string artist, string thumbUrl = null)
+        {
+            if (_currentVideo != null)
+            {
+                if (!string.IsNullOrEmpty(title)) _currentVideo.Title = title;
+                if (!string.IsNullOrEmpty(artist)) _currentVideo.Artist = artist;
+                if (!string.IsNullOrEmpty(thumbUrl)) _currentVideo.CustomThumbUrl = thumbUrl;
+            }
+            if (_lblVideoTitle != null && !string.IsNullOrEmpty(title))
+            {
+                _lblVideoTitle.Text = title;
+            }
+            if (_lblVideoChannel != null && !string.IsNullOrEmpty(artist))
+            {
+                _lblVideoChannel.Text = artist;
+            }
+            if (_picWatchChannelAvatar != null)
+            {
+                _picWatchChannelAvatar.Invalidate();
+            }
+        }
+
+        public void PlayUrlOrPlaylist(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url)) return;
+            string target = url.Trim();
+            Task.Run(async () =>
+            {
+                SafeInvoke(() => EmitStatus("Buscando informações do link externo..."));
+                var res = await _ytService.FetchUrlOrPlaylistAsync(target, _config, false);
+                SafeInvoke(() =>
+                {
+                    if (res != null && res.Item1 != null && res.Item1.Count > 0)
+                    {
+                        SetSearchResults(res.Item1, "Link Externo");
+                        PlayVideo(res.Item1[0]);
+                    }
+                    else
+                    {
+                        EmitStatus("Não foi possível carregar o vídeo desse link.");
+                    }
+                });
+            });
+        }
+
         private void UpdatePlayPauseButton()
         {
-            if (_btnVidPlayPause == null) return;
-            string icon;
-            if (_isLoading)
+            if (_wpfOverlay != null)
             {
-                icon = "...";
+                _wpfOverlay.UpdatePlaybackState(_isPlaying, CurrentVideoPositionSeconds, BufferedVideoDurationSeconds, TotalVideoDurationSeconds);
             }
-            else if (_vlcPlayer != null && _vlcPlayer.HasEnded)
-            {
-                icon = "\u21BA"; // ↺ Replay
-            }
-            else if (_isPlaying)
-            {
-                icon = "\u23F8"; // ❚❚ Pause
-            }
-            else
-            {
-                icon = "\u25B6"; // ▶ Play
-            }
-            _btnVidPlayPause.Text = icon;
         }
 
         private void PlayNextVideo()

@@ -72,14 +72,37 @@ namespace LiteTube
         {
             bool loaded = false;
 
-            // 1. Tenta carregar recurso compilado BAML via Application.LoadComponent
-            try
+            // 1. Carrega diretamente o arquivo WpfMediaListControl.xaml via XamlReader (rápido, sem FirstChanceExceptions)
+            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            string p1 = Path.Combine(baseDir, "src", "WpfMediaListControl.xaml");
+            string p2 = Path.Combine(baseDir, "WpfMediaListControl.xaml");
+            string targetPath = File.Exists(p1) ? p1 : (File.Exists(p2) ? p2 : null);
+
+            if (targetPath != null)
             {
-                var resourceUri = new Uri("/LiteTube;component/src/WpfMediaListControl.xaml", UriKind.Relative);
-                Application.LoadComponent(this, resourceUri);
-                loaded = true;
+                try
+                {
+                    using (var fs = new FileStream(targetPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    {
+                        var root = (FrameworkElement)XamlReader.Load(fs);
+                        this.Content = root;
+                        loaded = true;
+                    }
+                }
+                catch { }
             }
-            catch { }
+
+            // 2. Fallback: tenta carregar recurso compilado BAML via Application.LoadComponent
+            if (!loaded)
+            {
+                try
+                {
+                    var resourceUri = new Uri("/LiteTube;component/src/WpfMediaListControl.xaml", UriKind.Relative);
+                    Application.LoadComponent(this, resourceUri);
+                    loaded = true;
+                }
+                catch { }
+            }
 
             if (!loaded)
             {
@@ -90,25 +113,6 @@ namespace LiteTube
                     loaded = true;
                 }
                 catch { }
-            }
-
-            // 2. Fallback: carrega diretamente o arquivo WpfMediaListControl.xaml via XamlReader
-            if (!loaded)
-            {
-                string baseDir = AppDomain.CurrentDomain.BaseDirectory;
-                string p1 = Path.Combine(baseDir, "src", "WpfMediaListControl.xaml");
-                string p2 = Path.Combine(baseDir, "WpfMediaListControl.xaml");
-                string targetPath = File.Exists(p1) ? p1 : (File.Exists(p2) ? p2 : null);
-
-                if (targetPath != null)
-                {
-                    using (var fs = new FileStream(targetPath, FileMode.Open, FileAccess.Read, FileShare.Read))
-                    {
-                        var root = (FrameworkElement)XamlReader.Load(fs);
-                        this.Content = root;
-                        loaded = true;
-                    }
-                }
             }
 
             var container = this.Content as FrameworkElement ?? this;
@@ -1075,6 +1079,7 @@ namespace LiteTube
         public string Title { get { return _model != null ? (_model.DisplayTitle ?? _model.Title ?? "") : ""; } }
         public string Artist { get { return _model != null ? (_model.Artist ?? "") : ""; } }
         public string Duration { get { return _model != null ? (_model.Duration ?? "") : ""; } }
+        public string ThumbnailUrl { get { return _model != null ? _model.ThumbnailUrl : ""; } }
         public bool IsChannel { get { return _model != null && _model.IsChannel; } }
         public bool IsPlaylistCard { get { return _model != null && _model.IsPlaylistCard; } }
 
@@ -1326,10 +1331,9 @@ namespace LiteTube
             }
         }
 
-        public void EnsureThumbnailLoaded()
+        public async void EnsureThumbnailLoaded()
         {
-            if (_thumbRequested && _thumbnailSource != null) return;
-            _thumbRequested = true;
+            if (_thumbnailSource != null) return;
 
             string id = Id;
             if (string.IsNullOrEmpty(id)) return;
@@ -1346,12 +1350,35 @@ namespace LiteTube
                 }
             }
 
-            // 2. Se no estiver em disco, delega ao ThumbnailCache para download assncrono
+            if (_thumbRequested) return;
+            _thumbRequested = true;
+
+            // 2. Carrega via pipeline assíncrono moderno AsyncImageLoader
+            try
+            {
+                var loader = AsyncImageLoader.ImageLoaderBase.DefaultLoader;
+                string url = ThumbnailUrl;
+                if (!string.IsNullOrEmpty(url) && loader != null)
+                {
+                    var loadedImg = await loader.ProvideImageAsync(url).ConfigureAwait(false);
+                    if (loadedImg != null && _dispatcher != null && !_dispatcher.HasShutdownStarted)
+                    {
+                        var op = _dispatcher.BeginInvoke(new Action(() =>
+                        {
+                            ThumbnailSource = loadedImg;
+                        }), DispatcherPriority.Background);
+                        return;
+                    }
+                }
+            }
+            catch { }
+
+            // 3. Fallback adicional via ThumbnailCache
             ThumbnailCache.GetOrRequestThumbnail(_model, () =>
             {
                 if (_dispatcher != null && !_dispatcher.HasShutdownStarted)
                 {
-                    _dispatcher.BeginInvoke(new Action(() =>
+                    var op = _dispatcher.BeginInvoke(new Action(() =>
                     {
                         try
                         {
