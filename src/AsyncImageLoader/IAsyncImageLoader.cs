@@ -7,5 +7,6 @@ namespace AsyncImageLoader
     public interface IAsyncImageLoader : IDisposable
     {
         Task<BitmapSource> ProvideImageAsync(string url);
+        Task<BitmapSource> ProvideImageAsync(string url, int decodePixelWidth);
     }
 }

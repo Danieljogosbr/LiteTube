@@ -21,6 +21,23 @@ namespace AsyncImageLoader
             DependencyProperty.RegisterAttached("IsLoading", typeof(bool), typeof(ImageLoader),
                 new PropertyMetadata(false));
 
+        public static readonly DependencyProperty DecodePixelWidthProperty =
+            DependencyProperty.RegisterAttached("DecodePixelWidth", typeof(int), typeof(ImageLoader),
+                new PropertyMetadata(320));
+
+        public static int GetDecodePixelWidth(DependencyObject element)
+        {
+            if (element == null) return 320;
+            object val = element.GetValue(DecodePixelWidthProperty);
+            return (val is int i && i > 0) ? i : 320;
+        }
+
+        public static void SetDecodePixelWidth(DependencyObject element, int value)
+        {
+            if (element == null) return;
+            element.SetValue(DecodePixelWidthProperty, value);
+        }
+
         private static readonly DependencyProperty CurrentCtsProperty =
             DependencyProperty.RegisterAttached("CurrentCts", typeof(CancellationTokenSource), typeof(ImageLoader),
                 new PropertyMetadata(null));
@@ -91,7 +108,8 @@ namespace AsyncImageLoader
 
             try
             {
-                BitmapSource bitmap = await loader.ProvideImageAsync(url).ConfigureAwait(false);
+                int decodeWidth = GetDecodePixelWidth(image);
+                BitmapSource bitmap = await loader.ProvideImageAsync(url, decodeWidth).ConfigureAwait(false);
 
                 if (!cts.IsCancellationRequested)
                 {

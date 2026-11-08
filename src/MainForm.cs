@@ -206,6 +206,9 @@ namespace LiteTube
                         : "Aviso: yt-dlp.exe não encontrado na pasta bin.";
                 });
             }
+
+            // Dispara pré-aquecimento seguro do executável e conexões
+            App.PrewarmBackgroundServices();
         }
 
         private void BuildTopBar()
@@ -2347,6 +2350,16 @@ namespace LiteTube
                 catch { }
                 Logger.Info("SELFTEST", string.Format("Seamless Quality Switch (Troca Contínua Agnóstica 144p..4K sem reload) validado: ApiReady={0}.",
                     seamlessSwitchApiOk));
+
+                // 6.4 Validação do Pacote de Cold Start, Apontamento FFmpeg e Downsampling Nativo WPF
+                bool ytResolverOk = YtDlpResolver.IsAvailable();
+                string ffmpegResolvedDir = FFmpegResolver.ResolveFFmpegDirectory();
+                bool ffmpegDirValid = Directory.Exists(ffmpegResolvedDir) && (Directory.GetFiles(ffmpegResolvedDir, "avcodec*.dll").Length > 0);
+                var downsampleMethod = typeof(AsyncImageLoader.Loaders.DiskCachedWebImageLoader).GetMethod("ProvideImageAsync", new Type[] { typeof(string), typeof(int) });
+                bool downsampleSupported = (downsampleMethod != null);
+
+                Logger.Info("SELFTEST", string.Format("Otimizações de Boot, Apontamento FFmpeg e Downsampling WPF validados: YtDlpAvailable={0} | FFmpegValid={1} ('{2}') | NativeDownsample={3}.",
+                    ytResolverOk, ffmpegDirValid, Path.GetFileName(ffmpegResolvedDir), downsampleSupported));
 
                 // 7. Validação do ExternalLinkServer (Listener HTTP na porta 48125: rotas /ping e /play)
                 bool serverPingOk = false;

@@ -21,23 +21,30 @@ namespace AsyncImageLoader.Loaders
             _maxRamItems = maxRamItems;
         }
 
-        public override async Task<BitmapSource> ProvideImageAsync(string url)
+        public override Task<BitmapSource> ProvideImageAsync(string url)
+        {
+            return ProvideImageAsync(url, 320);
+        }
+
+        public override async Task<BitmapSource> ProvideImageAsync(string url, int decodePixelWidth)
         {
             if (string.IsNullOrWhiteSpace(url)) return null;
 
+            string cacheKey = decodePixelWidth > 0 ? string.Format("{0}#w={1}", url, decodePixelWidth) : url;
+
             // 1. Verificação instantânea em RAM
             BitmapSource cached;
-            if (_memoryCache.TryGetValue(url, out cached))
+            if (_memoryCache.TryGetValue(cacheKey, out cached))
             {
-                TouchLru(url);
+                TouchLru(cacheKey);
                 return cached;
             }
 
-            // 2. Carregamento de disco ou download
-            var bitmap = await base.ProvideImageAsync(url).ConfigureAwait(false);
+            // 2. Carregamento de disco ou download com downsampling nativo
+            var bitmap = await base.ProvideImageAsync(url, decodePixelWidth).ConfigureAwait(false);
             if (bitmap != null)
             {
-                StoreInRam(url, bitmap);
+                StoreInRam(cacheKey, bitmap);
             }
 
             return bitmap;

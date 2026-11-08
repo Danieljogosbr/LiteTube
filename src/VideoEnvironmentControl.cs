@@ -2605,11 +2605,9 @@ namespace LiteTube
                 string videoId = _currentVideo.Id;
 
                 // 1. O vídeo atual continua tocando a partir do buffer na GPU/RAM.
-                // 2. Resolve dinamicamente as URLs da nova resolução em segundo plano.
-                var (newVideoUrl, newAudioUrl) = await Task.Run(() =>
-                {
-                    return ProgressiveVideoSession.ResolveStreamUrls(videoId, targetHeight, null, _config.BrowserForCookies, _config.CookiesFilePath);
-                });
+                // 2. Resolve dinamicamente as URLs da nova resolução em segundo plano de forma não-bloqueante.
+                var (newVideoUrl, newAudioUrl) = await ProgressiveVideoSession.ResolveStreamUrlsAsync(
+                    videoId, targetHeight, YtDlpResolver.GetYtDlpDirectory(), _config.BrowserForCookies, _config.CookiesFilePath);
 
                 if (_currentVideo == null || _currentVideo.Id != videoId)
                     return;
@@ -2619,7 +2617,7 @@ namespace LiteTube
 
                 // 3. Captura precisa do timestamp atual da mídia (em ticks)
                 long currentTicks = _player != null ? _player.CurTime : 0;
-                bool wasPlaying = _isPlaying;
+                bool wasPlaying = _isPlaying || (_player != null && _player.IsPlaying);
 
                 // 4. Efetua a troca atômica sem resetar o marcador de reprodução
                 await SwitchQualityStreamAtomicAsync(newVideoUrl, newAudioUrl, currentTicks, wasPlaying);
@@ -2675,6 +2673,10 @@ namespace LiteTube
                     if (wasPlaying)
                     {
                         _player.Play();
+                    }
+                    else
+                    {
+                        _player.Pause();
                     }
                 }
                 catch (Exception ex)

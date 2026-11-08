@@ -454,7 +454,7 @@ namespace LiteTube
                 var loader = AsyncImageLoader.ImageLoaderBase.DefaultLoader;
                 if (loader != null)
                 {
-                    var bmp = await loader.ProvideImageAsync(url).ConfigureAwait(false);
+                    var bmp = await loader.ProvideImageAsync(url, 120).ConfigureAwait(false);
                     if (bmp != null)
                     {
                         var op = Dispatcher.BeginInvoke(new Action(() =>
@@ -486,7 +486,9 @@ namespace LiteTube
                     var bmp = new BitmapImage();
                     bmp.BeginInit();
                     bmp.CacheOption = BitmapCacheOption.OnLoad;
+                    bmp.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
                     bmp.StreamSource = ms;
+                    bmp.DecodePixelWidth = 120;
                     bmp.EndInit();
                     bmp.Freeze();
                     _thumbImageBrush.ImageSource = bmp;

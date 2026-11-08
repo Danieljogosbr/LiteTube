@@ -35,8 +35,10 @@ namespace LiteTube
             _video = video;
             _knownDurationSeconds = (video != null && video.DurationSeconds > 0) ? video.DurationSeconds : 240;
             _height = height > 0 ? height : 720;
-            _binDir = binDir;
-            _ytDlpPath = Path.Combine(binDir, "yt-dlp.exe");
+            _ytDlpPath = (!string.IsNullOrEmpty(binDir) && File.Exists(Path.Combine(binDir, "yt-dlp.exe")))
+                ? Path.Combine(binDir, "yt-dlp.exe")
+                : YtDlpResolver.GetYtDlpBinaryPath();
+            _binDir = Path.GetDirectoryName(_ytDlpPath) ?? binDir;
             _browserForCookies = browserForCookies;
             _cookiesFilePath = cookiesFilePath;
         }

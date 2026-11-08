@@ -143,5 +143,37 @@ namespace LiteTube
             }
             return null;
         }
+
+        /// <summary>
+        /// Pre-warms DNS resolution, TCP sockets, and TLS 1.3 handshakes in background
+        /// for key YouTube and CDN endpoints (i.ytimg.com, www.youtube.com, music.youtube.com).
+        /// </summary>
+        public static async Task PrewarmEndpointsAsync(CancellationToken ct = default)
+        {
+            string[] endpoints = new string[]
+            {
+                "https://www.youtube.com/generate_204",
+                "https://i.ytimg.com/generate_204",
+                "https://music.youtube.com/generate_204"
+            };
+
+            var tasks = new List<Task>();
+            foreach (string url in endpoints)
+            {
+                tasks.Add(Task.Run(async () =>
+                {
+                    try
+                    {
+                        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                        cts.CancelAfter(TimeSpan.FromSeconds(3));
+                        using var req = new HttpRequestMessage(HttpMethod.Get, url);
+                        using var resp = await _client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, cts.Token).ConfigureAwait(false);
+                    }
+                    catch { }
+                }, ct));
+            }
+
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+        }
     }
 }

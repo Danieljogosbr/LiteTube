@@ -1072,6 +1072,20 @@ namespace LiteTube
         private double _cardWidth = 320;
         private double _cardHeight = 268;
         private double _thumbHeight = 180;
+        private int _thumbnailDecodeWidth = 320;
+
+        public int ThumbnailDecodeWidth
+        {
+            get { return _thumbnailDecodeWidth; }
+            set
+            {
+                if (_thumbnailDecodeWidth != value)
+                {
+                    _thumbnailDecodeWidth = value;
+                    OnPropertyChanged("ThumbnailDecodeWidth");
+                }
+            }
+        }
 
         public TrackItem Model { get { return _model; } }
         public int Index { get { return _index; } }
@@ -1171,7 +1185,16 @@ namespace LiteTube
         public double CardWidth
         {
             get { return _cardWidth; }
-            set { if (_cardWidth != value) { _cardWidth = value; OnPropertyChanged("CardWidth"); } }
+            set
+            {
+                if (_cardWidth != value)
+                {
+                    _cardWidth = value;
+                    _thumbnailDecodeWidth = Math.Max(160, Math.Min(480, (int)Math.Round(value)));
+                    OnPropertyChanged("CardWidth");
+                    OnPropertyChanged("ThumbnailDecodeWidth");
+                }
+            }
         }
 
         public double CardHeight
@@ -1338,11 +1361,13 @@ namespace LiteTube
             string id = Id;
             if (string.IsNullOrEmpty(id)) return;
 
+            int decodeW = _thumbnailDecodeWidth > 0 ? _thumbnailDecodeWidth : 320;
+
             // 1. Tenta carregar do cache persistente em disco (Zero impacto de rede)
             if (ThumbnailCache.HasDiskCache(id))
             {
                 string diskPath = ThumbnailCache.GetDiskCachePath(id);
-                var img = LoadThumbnailImageFast(diskPath);
+                var img = LoadThumbnailImageFast(diskPath, decodeW);
                 if (img != null)
                 {
                     ThumbnailSource = img;
@@ -1353,14 +1378,14 @@ namespace LiteTube
             if (_thumbRequested) return;
             _thumbRequested = true;
 
-            // 2. Carrega via pipeline assíncrono moderno AsyncImageLoader
+            // 2. Carrega via pipeline assíncrono moderno AsyncImageLoader com downsampling nativo
             try
             {
                 var loader = AsyncImageLoader.ImageLoaderBase.DefaultLoader;
                 string url = ThumbnailUrl;
                 if (!string.IsNullOrEmpty(url) && loader != null)
                 {
-                    var loadedImg = await loader.ProvideImageAsync(url).ConfigureAwait(false);
+                    var loadedImg = await loader.ProvideImageAsync(url, decodeW).ConfigureAwait(false);
                     if (loadedImg != null && _dispatcher != null && !_dispatcher.HasShutdownStarted)
                     {
                         var op = _dispatcher.BeginInvoke(new Action(() =>
@@ -1385,7 +1410,7 @@ namespace LiteTube
                             string path = ThumbnailCache.GetDiskCachePath(id);
                             if (File.Exists(path))
                             {
-                                var loadedImg = LoadThumbnailImageFast(path);
+                                var loadedImg = LoadThumbnailImageFast(path, decodeW);
                                 if (loadedImg != null)
                                 {
                                     ThumbnailSource = loadedImg;
@@ -1398,7 +1423,7 @@ namespace LiteTube
             });
         }
 
-        public static ImageSource LoadThumbnailImageFast(string filePath)
+        public static ImageSource LoadThumbnailImageFast(string filePath, int decodePixelWidth = 320)
         {
             if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
                 return null;
@@ -1416,8 +1441,12 @@ namespace LiteTube
                 var bitmap = new BitmapImage();
                 bitmap.BeginInit();
                 bitmap.CacheOption = BitmapCacheOption.OnLoad;
+                bitmap.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
                 bitmap.StreamSource = new MemoryStream(buffer);
-                bitmap.DecodePixelWidth = 320;
+                if (decodePixelWidth > 0)
+                {
+                    bitmap.DecodePixelWidth = decodePixelWidth;
+                }
                 bitmap.EndInit();
 
                 if (bitmap.CanFreeze)

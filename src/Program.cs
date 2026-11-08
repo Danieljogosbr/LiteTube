@@ -143,15 +143,16 @@ namespace LiteTube
         {
             try
             {
-                string ffmpegPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "FFmpeg");
+                string ffmpegPath = FFmpegResolver.ResolveFFmpegDirectory();
                 string pluginsPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Plugins");
+
                 FlyleafLib.Engine.Start(new FlyleafLib.EngineConfig()
                 {
                     UIRefreshInterval = 30,
-                    PluginsPath = Directory.Exists(pluginsPath) ? pluginsPath : ":FFmpeg",
-                    FFmpegPath = Directory.Exists(ffmpegPath) ? ffmpegPath : ":FFmpeg"
+                    PluginsPath = Directory.Exists(pluginsPath) ? pluginsPath : ffmpegPath,
+                    FFmpegPath = ffmpegPath
                 });
-                Logger.Info("FLYLEAF", "Motor FlyleafLib / Direct3D 11 inicializado com sucesso.");
+                Logger.Info("FLYLEAF", "Motor FlyleafLib / Direct3D 11 inicializado com sucesso apontando para: " + ffmpegPath);
             }
             catch (Exception ex)
             {

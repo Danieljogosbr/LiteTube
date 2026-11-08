@@ -28,14 +28,20 @@ namespace AsyncImageLoader.Loaders
             catch { }
         }
 
-        public virtual async Task<BitmapSource> ProvideImageAsync(string url)
+        public virtual Task<BitmapSource> ProvideImageAsync(string url)
+        {
+            return ProvideImageAsync(url, 320);
+        }
+
+        public virtual async Task<BitmapSource> ProvideImageAsync(string url, int decodePixelWidth)
         {
             if (string.IsNullOrWhiteSpace(url)) return null;
+            if (decodePixelWidth <= 0) decodePixelWidth = 320;
 
             // 1. Arquivo local direto
             if (File.Exists(url))
             {
-                return LoadAndFreeze(url);
+                return LoadAndFreeze(url, decodePixelWidth);
             }
 
             string diskPath = GetDiskCachePath(url);
@@ -43,7 +49,7 @@ namespace AsyncImageLoader.Loaders
             // 2. Cache em disco
             if (File.Exists(diskPath))
             {
-                var cached = LoadAndFreeze(diskPath);
+                var cached = LoadAndFreeze(diskPath, decodePixelWidth);
                 if (cached != null) return cached;
             }
 
@@ -57,7 +63,7 @@ namespace AsyncImageLoader.Loaders
                 }
                 catch { }
 
-                return DecodeAndFreeze(bytes);
+                return DecodeAndFreeze(bytes, decodePixelWidth);
             }
 
             return null;
@@ -129,7 +135,7 @@ namespace AsyncImageLoader.Loaders
             return null;
         }
 
-        public static BitmapSource LoadAndFreeze(string filePath)
+        public static BitmapSource LoadAndFreeze(string filePath, int decodePixelWidth = 320)
         {
             try
             {
@@ -141,7 +147,7 @@ namespace AsyncImageLoader.Loaders
                     buffer = ms.ToArray();
                 }
 
-                return DecodeAndFreeze(buffer);
+                return DecodeAndFreeze(buffer, decodePixelWidth);
             }
             catch
             {
@@ -149,15 +155,19 @@ namespace AsyncImageLoader.Loaders
             }
         }
 
-        public static BitmapSource DecodeAndFreeze(byte[] buffer)
+        public static BitmapSource DecodeAndFreeze(byte[] buffer, int decodePixelWidth = 320)
         {
             try
             {
                 var bitmap = new BitmapImage();
                 bitmap.BeginInit();
                 bitmap.CacheOption = BitmapCacheOption.OnLoad;
+                bitmap.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
                 bitmap.StreamSource = new MemoryStream(buffer);
-                bitmap.DecodePixelWidth = 320; // Otimização de RAM
+                if (decodePixelWidth > 0)
+                {
+                    bitmap.DecodePixelWidth = decodePixelWidth;
+                }
                 bitmap.EndInit();
 
                 if (bitmap.CanFreeze)

@@ -42,9 +42,9 @@ namespace LiteTube
         public YouTubeService(string customBaseDir = null)
         {
             string baseDir = !string.IsNullOrEmpty(customBaseDir) ? customBaseDir : AppDomain.CurrentDomain.BaseDirectory;
-            _binDir = Path.Combine(baseDir, "bin");
-            _ytDlpPath = Path.Combine(_binDir, "yt-dlp.exe");
-            _ffmpegPath = Path.Combine(_binDir, "ffmpeg.exe");
+            _ytDlpPath = YtDlpResolver.GetYtDlpBinaryPath();
+            _binDir = YtDlpResolver.GetYtDlpDirectory();
+            _ffmpegPath = FFmpegResolver.ResolveFFmpegExecutablePath();
             _cacheDir = Path.Combine(baseDir, "data", "cache");
 
             if (!Directory.Exists(_cacheDir)) Directory.CreateDirectory(_cacheDir);
@@ -54,7 +54,7 @@ namespace LiteTube
 
         public bool IsYtDlpAvailable()
         {
-            return File.Exists(_ytDlpPath);
+            return YtDlpResolver.IsAvailable();
         }
 
         public async Task<bool> EnsureYtDlpAsync(Action<string> onStatus)
@@ -2019,7 +2019,9 @@ namespace LiteTube
                 if (track.DurationSeconds <= 1800 && !token.IsCancellationRequested)
                 {
                     string tempFile = Path.Combine(_cacheDir, safeId + "_" + Guid.NewGuid().ToString("N").Substring(0, 6) + ".m4a");
-                    string ffmpegArg = File.Exists(_ffmpegPath) ? string.Format("--ffmpeg-location \"{0}\" --fixup force ", _binDir) : "";
+                    string ffmpegArg = (!string.IsNullOrEmpty(_ffmpegPath) && File.Exists(_ffmpegPath))
+                        ? string.Format("--ffmpeg-location \"{0}\" --fixup force ", Path.GetDirectoryName(_ffmpegPath))
+                        : "";
                     string dlArgs = string.Format(
                         "{0}{1}--no-playlist -f \"{2}\" --no-part --no-warnings -o \"{3}\" \"{4}\"",
                         ffmpegArg,

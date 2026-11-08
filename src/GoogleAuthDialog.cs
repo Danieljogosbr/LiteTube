@@ -45,8 +45,8 @@ namespace LiteTube
             if (!Directory.Exists(dataDir)) Directory.CreateDirectory(dataDir);
             _cookiesPath = Path.Combine(dataDir, "cookies.txt");
 
-            _binDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "bin");
-            _ytDlpPath = Path.Combine(_binDir, "yt-dlp.exe");
+            _ytDlpPath = YtDlpResolver.GetYtDlpBinaryPath();
+            _binDir = YtDlpResolver.GetYtDlpDirectory();
 
             SetBrowserEmulation();
             InitializeComponent();

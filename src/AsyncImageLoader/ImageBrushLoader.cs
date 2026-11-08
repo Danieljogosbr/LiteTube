@@ -57,7 +57,8 @@ namespace AsyncImageLoader
 
             try
             {
-                BitmapSource bitmap = await loader.ProvideImageAsync(url).ConfigureAwait(false);
+                int decodeWidth = ImageLoader.GetDecodePixelWidth(brush);
+                BitmapSource bitmap = await loader.ProvideImageAsync(url, decodeWidth).ConfigureAwait(false);
 
                 if (!cts.IsCancellationRequested)
                 {

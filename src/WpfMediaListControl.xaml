@@ -103,7 +103,7 @@
                                     <Border Grid.Row="0" Height="{Binding ThumbHeight}" CornerRadius="8,8,0,0"
                                             ClipToBounds="True" Background="#161618">
                                         <Grid>
-                                            <Image asyncImageLoader:ImageLoader.Source="{Binding ThumbnailUrl}" Source="{Binding ThumbnailSource}" Stretch="UniformToFill"/>
+                                            <Image asyncImageLoader:ImageLoader.Source="{Binding ThumbnailUrl}" asyncImageLoader:ImageLoader.DecodePixelWidth="{Binding ThumbnailDecodeWidth}" Source="{Binding ThumbnailSource}" Stretch="UniformToFill"/>
                                             <!-- Fallback Icon if thumb not loaded -->
                                             <TextBlock Text="{Binding PlaceholderIcon}" Foreground="#4A4A58" FontSize="26"
                                                        FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"
@@ -216,7 +216,7 @@
                     <!-- 16:9 Thumbnail (136 x 76) -->
                     <Border Grid.Column="0" Width="136" Height="76" CornerRadius="6" ClipToBounds="True" Background="#161618">
                         <Grid>
-                            <Image asyncImageLoader:ImageLoader.Source="{Binding ThumbnailUrl}" Source="{Binding ThumbnailSource}" Stretch="UniformToFill"/>
+                            <Image asyncImageLoader:ImageLoader.Source="{Binding ThumbnailUrl}" asyncImageLoader:ImageLoader.DecodePixelWidth="160" Source="{Binding ThumbnailSource}" Stretch="UniformToFill"/>
                             <TextBlock Text="{Binding PlaceholderIcon}" Foreground="#4A4A58" FontSize="20"
                                        FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"
                                        Visibility="{Binding FallbackVisibility}"/>
@@ -276,7 +276,7 @@
                     <!-- Thumbnail Container (78 x 46) -->
                     <Border Grid.Column="1" Width="78" Height="46" CornerRadius="4" ClipToBounds="True" Background="#161618">
                         <Grid>
-                            <Image asyncImageLoader:ImageLoader.Source="{Binding ThumbnailUrl}" Source="{Binding ThumbnailSource}" Stretch="UniformToFill"/>
+                            <Image asyncImageLoader:ImageLoader.Source="{Binding ThumbnailUrl}" asyncImageLoader:ImageLoader.DecodePixelWidth="100" Source="{Binding ThumbnailSource}" Stretch="UniformToFill"/>
                             <TextBlock Text="{Binding PlaceholderIcon}" Foreground="#4A4A58" FontSize="18"
                                        FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"
                                        Visibility="{Binding FallbackVisibility}"/>
