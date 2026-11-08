@@ -47,6 +47,16 @@ namespace LiteTube
         private TextBlock _sponsorSkipBannerText;
         private Border _gearPopupPanel;
 
+        // Autoplay Countdown Overlay (8s) elements
+        private Grid _autoplayOverlay;
+        private TextBlock _autoplayCountdownText;
+        private System.Windows.Controls.Image _autoplayNextThumbnail;
+        private TextBlock _autoplayNextTitle;
+        private TextBlock _autoplayNextAuthor;
+        private System.Windows.Controls.ProgressBar _autoplayProgressBar;
+        private Button _btnAutoplayCancel;
+        private Button _btnAutoplayPlayNow;
+
         // Scrubber elements
         private Grid _scrubberHitArea;
         private Border _scrubberBgTrack;
@@ -101,6 +111,7 @@ namespace LiteTube
 
         // State
         private bool _isPlaying = false;
+        private bool _isLiveStream = false;
         private bool _isMuted = false;
         private double _volume0To1 = 0.85;
         private double _currentSeconds = 0.0;
@@ -126,12 +137,15 @@ namespace LiteTube
         private readonly DispatcherTimer _inactivityTimer;
         private readonly DispatcherTimer _sponsorBannerTimer;
         private readonly DispatcherTimer _toastTimer;
+        private readonly DispatcherTimer _autoplayTimer;
+        private int _autoplayTicksRemaining = 80;
         private POINT _lastGlobalCursorPos;
         private DateTime _lastMouseMoveUtc = DateTime.UtcNow;
 
         // Events to bridge with VideoEnvironmentControl & FlyleafVideoControl
         public event Action PlayPauseRequested;
         public event Action NextVideoRequested;
+        public event Action AutoplayCancelled;
         public event Action<double> OnUserSeekCommitted;
         public event Action<double> SeekRequested;
         public event Action MuteToggleRequested;
@@ -185,6 +199,12 @@ namespace LiteTube
                     _toastNotificationBanner.Visibility = Visibility.Collapsed;
                 }
             };
+
+            _autoplayTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(100)
+            };
+            _autoplayTimer.Tick += OnAutoplayTimerTick;
         }
 
         public WpfVideoPlayerOverlay(System.Windows.Forms.Control targetVideoContainer, System.Windows.Forms.Form ownerForm)
@@ -229,6 +249,12 @@ namespace LiteTube
                     _toastNotificationBanner.Visibility = Visibility.Collapsed;
                 }
             };
+
+            _autoplayTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromMilliseconds(100)
+            };
+            _autoplayTimer.Tick += OnAutoplayTimerTick;
         }
 
         private void InitializeOverlayContent(bool createWindow)
@@ -280,6 +306,15 @@ namespace LiteTube
             _sponsorSkipBanner = FindElement<Border>("SponsorSkipBanner");
             _sponsorSkipBannerText = FindElement<TextBlock>("SponsorSkipBannerText");
             _gearPopupPanel = FindElement<Border>("GearPopupPanel");
+
+            _autoplayOverlay = FindElement<Grid>("AutoplayOverlay");
+            _autoplayCountdownText = FindElement<TextBlock>("AutoplayCountdownText");
+            _autoplayNextThumbnail = FindElement<System.Windows.Controls.Image>("AutoplayNextThumbnail");
+            _autoplayNextTitle = FindElement<TextBlock>("AutoplayNextTitle");
+            _autoplayNextAuthor = FindElement<TextBlock>("AutoplayNextAuthor");
+            _autoplayProgressBar = FindElement<System.Windows.Controls.ProgressBar>("AutoplayProgressBar");
+            _btnAutoplayCancel = FindElement<Button>("BtnAutoplayCancel");
+            _btnAutoplayPlayNow = FindElement<Button>("BtnAutoplayPlayNow");
 
             _scrubberHitArea = FindElement<Grid>("ScrubberHitArea");
             _scrubberBgTrack = FindElement<Border>("ScrubberBgTrack");
@@ -428,6 +463,16 @@ namespace LiteTube
 
             // Transport Buttons
             WireButton(_btnPlayPause, () => { if (PlayPauseRequested != null) PlayPauseRequested(); });
+
+            // Autoplay Countdown Buttons
+            if (_btnAutoplayCancel != null)
+            {
+                _btnAutoplayCancel.Click += BtnAutoplayCancel_Click;
+            }
+            if (_btnAutoplayPlayNow != null)
+            {
+                _btnAutoplayPlayNow.Click += BtnAutoplayPlayNow_Click;
+            }
             WireButton(_btnNextVideo, () => { if (NextVideoRequested != null) NextVideoRequested(); });
 
             // Expandable Volume Slider on Speaker Hover
@@ -867,26 +912,37 @@ namespace LiteTube
 
             if (_scrubberTooltipBorder != null && _scrubberTooltipText != null)
             {
-                string timeLabel = YouTubeService.FormatSeconds(targetSec);
-                string segName = GetHoveredSponsorCategoryLabel(targetSec);
-                _scrubberTooltipText.Text = !string.IsNullOrEmpty(segName)
-                    ? string.Format("{0} • {1}", timeLabel, segName)
-                    : timeLabel;
-
-                if (_scrubberPreviewImageBorder != null && _scrubberPreviewImage != null)
+                if (_isLiveStream)
                 {
-                    var previewBmp = _activeStoryboard != null
-                        ? _activeStoryboard.TryGetFrame(targetSec, _totalSeconds, OnStoryboardSheetReady)
-                        : null;
-
-                    if (previewBmp != null)
-                    {
-                        _scrubberPreviewImage.Source = previewBmp;
-                        _scrubberPreviewImageBorder.Visibility = Visibility.Visible;
-                    }
-                    else
+                    _scrubberTooltipText.Text = "🔴 AO VIVO";
+                    if (_scrubberPreviewImageBorder != null)
                     {
                         _scrubberPreviewImageBorder.Visibility = Visibility.Collapsed;
+                    }
+                }
+                else
+                {
+                    string timeLabel = YouTubeService.FormatSeconds(targetSec);
+                    string segName = GetHoveredSponsorCategoryLabel(targetSec);
+                    _scrubberTooltipText.Text = !string.IsNullOrEmpty(segName)
+                        ? string.Format("{0} • {1}", timeLabel, segName)
+                        : timeLabel;
+
+                    if (_scrubberPreviewImageBorder != null && _scrubberPreviewImage != null)
+                    {
+                        var previewBmp = _activeStoryboard != null
+                            ? _activeStoryboard.TryGetFrame(targetSec, _totalSeconds, OnStoryboardSheetReady)
+                            : null;
+
+                        if (previewBmp != null)
+                        {
+                            _scrubberPreviewImage.Source = previewBmp;
+                            _scrubberPreviewImageBorder.Visibility = Visibility.Visible;
+                        }
+                        else
+                        {
+                            _scrubberPreviewImageBorder.Visibility = Visibility.Collapsed;
+                        }
                     }
                 }
 
@@ -1104,9 +1160,140 @@ namespace LiteTube
             RefreshTimelineVisuals();
         }
 
+        public void SetLiveStreamMode(bool isLive)
+        {
+            _isLiveStream = isLive;
+            RunOnWpfDispatcher(() => RefreshTimelineVisuals());
+        }
+
+        public void StartAutoplayCountdown(TrackItem nextVideo)
+        {
+            if (nextVideo == null) return;
+
+            RunOnWpfDispatcher(() =>
+            {
+                if (_autoplayOverlay == null)
+                {
+                    if (NextVideoRequested != null) NextVideoRequested();
+                    return;
+                }
+
+                _autoplayTicksRemaining = 80;
+                if (_autoplayCountdownText != null) _autoplayCountdownText.Text = "8";
+                if (_autoplayProgressBar != null) _autoplayProgressBar.Value = 80;
+                if (_autoplayNextTitle != null) _autoplayNextTitle.Text = !string.IsNullOrWhiteSpace(nextVideo.Title) ? nextVideo.Title : "Próximo Vídeo";
+                if (_autoplayNextAuthor != null) _autoplayNextAuthor.Text = !string.IsNullOrWhiteSpace(nextVideo.Artist) ? nextVideo.Artist : "Canal do YouTube";
+                if (_autoplayNextThumbnail != null) _autoplayNextThumbnail.Source = null;
+
+                _autoplayOverlay.Visibility = Visibility.Visible;
+                SetControlsVisibleAnimated(true);
+
+                string thumbUrl = !string.IsNullOrWhiteSpace(nextVideo.ThumbnailUrl)
+                    ? nextVideo.ThumbnailUrl
+                    : (!string.IsNullOrWhiteSpace(nextVideo.Id) ? "https://i.ytimg.com/vi/" + nextVideo.Id + "/mqdefault.jpg" : "");
+
+                if (!string.IsNullOrEmpty(thumbUrl))
+                {
+                    string targetVideoId = nextVideo.Id;
+                    System.Threading.Tasks.Task.Run(async () =>
+                    {
+                        try
+                        {
+                            byte[] bytes = await HttpPipeline.GetByteArrayAsync(thumbUrl).ConfigureAwait(false);
+                            if (bytes != null && bytes.Length > 0)
+                            {
+                                var bmp = StoryboardService.DecodeFrozenBitmap(bytes, 280);
+                                if (bmp != null)
+                                {
+                                    RunOnWpfDispatcher(() =>
+                                    {
+                                        if (_autoplayNextThumbnail != null && _autoplayOverlay != null && _autoplayOverlay.Visibility == Visibility.Visible)
+                                        {
+                                            _autoplayNextThumbnail.Source = bmp;
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                        catch { }
+                    });
+                }
+
+                _autoplayTimer.Stop();
+                _autoplayTimer.Start();
+            });
+        }
+
+        public void CancelAutoplayCountdown()
+        {
+            RunOnWpfDispatcher(() =>
+            {
+                _autoplayTimer.Stop();
+                if (_autoplayOverlay != null)
+                {
+                    _autoplayOverlay.Visibility = Visibility.Collapsed;
+                }
+            });
+        }
+
+        private void OnAutoplayTimerTick(object sender, EventArgs e)
+        {
+            _autoplayTicksRemaining--;
+            if (_autoplayProgressBar != null)
+            {
+                _autoplayProgressBar.Value = Math.Max(0, _autoplayTicksRemaining);
+            }
+            if (_autoplayCountdownText != null)
+            {
+                int secsLeft = (int)Math.Ceiling(Math.Max(0, _autoplayTicksRemaining) / 10.0);
+                _autoplayCountdownText.Text = secsLeft.ToString();
+            }
+
+            if (_autoplayTicksRemaining <= 0)
+            {
+                _autoplayTimer.Stop();
+                if (_autoplayOverlay != null)
+                {
+                    _autoplayOverlay.Visibility = Visibility.Collapsed;
+                }
+                if (NextVideoRequested != null) NextVideoRequested();
+            }
+        }
+
+        private void BtnAutoplayCancel_Click(object sender, RoutedEventArgs e)
+        {
+            RegisterUserActivity();
+            CancelAutoplayCountdown();
+            if (AutoplayCancelled != null) AutoplayCancelled();
+        }
+
+        private void BtnAutoplayPlayNow_Click(object sender, RoutedEventArgs e)
+        {
+            RegisterUserActivity();
+            CancelAutoplayCountdown();
+            if (NextVideoRequested != null) NextVideoRequested();
+        }
+
         private void RefreshTimelineVisuals()
         {
             if (_scrubberHitArea == null) return;
+
+            double trackW = _scrubberHitArea.ActualWidth;
+
+            if (_isLiveStream)
+            {
+                if (_txtTimeDisplay != null)
+                {
+                    _txtTimeDisplay.Text = "🔴 AO VIVO";
+                }
+                if (_scrubberPlayedBar != null) _scrubberPlayedBar.Width = Math.Max(0.0, trackW);
+                if (_scrubberBufferBar != null) _scrubberBufferBar.Width = Math.Max(0.0, trackW);
+                if (_scrubberThumbHead != null && trackW > 1.0)
+                {
+                    Canvas.SetLeft(_scrubberThumbHead, Math.Max(-6.5, trackW - 6.5));
+                }
+                return;
+            }
 
             double displayCur = _isUserDraggingScrubber ? _dragScrubTargetSeconds : _currentSeconds;
             if (_txtTimeDisplay != null)
@@ -1116,7 +1303,6 @@ namespace LiteTube
                     YouTubeService.FormatSeconds(_totalSeconds));
             }
 
-            double trackW = _scrubberHitArea.ActualWidth;
             if (trackW <= 1.0 || _totalSeconds <= 0.0)
             {
                 if (_scrubberPlayedBar != null) _scrubberPlayedBar.Width = 0;
@@ -1254,6 +1440,8 @@ namespace LiteTube
 
             try { _inactivityTimer.Stop(); } catch { }
             try { _sponsorBannerTimer.Stop(); } catch { }
+            try { _toastTimer.Stop(); } catch { }
+            try { _autoplayTimer.Stop(); } catch { }
 
             if (_overlayWindow != null)
             {

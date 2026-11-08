@@ -14,6 +14,7 @@ namespace LiteTube
         private static string _cachedBinaryPath;
         private static readonly object _lock = new object();
         private static bool _isPrewarmed = false;
+        private static bool _isUpdating = false;
 
         /// <summary>
         /// Locates the yt-dlp.exe executable across standard project and runtime paths.
@@ -126,6 +127,9 @@ namespace LiteTube
                         _isPrewarmed = true;
                         string ver = proc.StandardOutput.ReadToEnd().Trim();
                         Logger.Info("PREWARM", string.Format("⚡ yt-dlp ({0}) pré-aquecido no Standby Cache em {1}ms.", ver, sw.ElapsedMilliseconds));
+
+                        // Dispara verificação silenciosa de atualização em background (1x a cada 24h)
+                        var _ = EnsureUpdatedInBackgroundAsync(force: false);
                     }
                     else
                     {
@@ -136,6 +140,82 @@ namespace LiteTube
                 catch (Exception ex)
                 {
                     Logger.Warn("PREWARM", "Falha segura no pré-aquecimento do yt-dlp: " + ex.Message);
+                }
+            });
+        }
+
+        /// <summary>
+        /// Verifica e aplica atualizações do yt-dlp (-U) de forma silenciosa em background
+        /// para garantir resiliência contínua contra mudanças de assinatura do YouTube.
+        /// </summary>
+        public static Task EnsureUpdatedInBackgroundAsync(bool force = false)
+        {
+            if (_isUpdating) return Task.CompletedTask;
+
+            return Task.Run(() =>
+            {
+                if (_isUpdating) return;
+                _isUpdating = true;
+
+                try
+                {
+                    string path = GetYtDlpBinaryPath();
+                    if (!File.Exists(path)) return;
+
+                    string dir = GetYtDlpDirectory();
+                    string markerFile = Path.Combine(dir, "yt-dlp.lastupdate");
+
+                    if (!force && File.Exists(markerFile))
+                    {
+                        DateTime lastCheck = File.GetLastWriteTimeUtc(markerFile);
+                        if ((DateTime.UtcNow - lastCheck).TotalHours < 24.0)
+                        {
+                            return;
+                        }
+                    }
+
+                    try
+                    {
+                        File.WriteAllText(markerFile, DateTime.UtcNow.ToString("O"));
+                    }
+                    catch { }
+
+                    Logger.Info("YTDLP", "Verificando atualização automática do yt-dlp (-U) em background...");
+                    using var proc = new Process
+                    {
+                        StartInfo = new ProcessStartInfo
+                        {
+                            FileName = path,
+                            Arguments = "-U",
+                            UseShellExecute = false,
+                            CreateNoWindow = true,
+                            RedirectStandardOutput = true,
+                            RedirectStandardError = true
+                        }
+                    };
+
+                    proc.Start();
+                    bool finished = proc.WaitForExit(45000);
+                    if (finished)
+                    {
+                        string output = proc.StandardOutput.ReadToEnd().Trim();
+                        if (!string.IsNullOrEmpty(output))
+                        {
+                            Logger.Info("YTDLP", "Auto-update yt-dlp: " + output.Replace("\r", "").Replace("\n", " | "));
+                        }
+                    }
+                    else
+                    {
+                        try { proc.Kill(); } catch { }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn("YTDLP", "Falha silenciosa no auto-update do yt-dlp: " + ex.Message);
+                }
+                finally
+                {
+                    _isUpdating = false;
                 }
             });
         }

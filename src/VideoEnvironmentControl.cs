@@ -812,8 +812,18 @@ namespace LiteTube
                     Logger.Info("FLYLEAF", "Fim do vídeo alcançado sem cortes prematuros.");
                     _isPlaying = false;
                     UpdatePlayPauseButton();
-                    EmitStatus("🎬 Fim do vídeo.");
-                    PlayNextVideo();
+
+                    var nextCandidate = GetNextVideoCandidate();
+                    if (nextCandidate != null && _wpfOverlay != null)
+                    {
+                        TriggerNextVideoPrefetch();
+                        _wpfOverlay.StartAutoplayCountdown(nextCandidate);
+                        EmitStatus(string.Format("⏭️ Próximo vídeo em 8s: {0}", nextCandidate.Title));
+                    }
+                    else
+                    {
+                        EmitStatus("🎬 Fim do vídeo.");
+                    }
                 }
             });
         }
@@ -862,6 +872,7 @@ namespace LiteTube
 
             _wpfOverlay.PlayPauseRequested += () => SafeInvoke(() => TogglePlayPause());
             _wpfOverlay.NextVideoRequested += () => SafeInvoke(() => PlayNextVideo());
+            _wpfOverlay.AutoplayCancelled += () => SafeInvoke(() => EmitStatus("⏹️ Reprodução automática cancelada."));
             _wpfOverlay.OnUserSeekCommitted += targetSec => SafeInvoke(() => SeekToSeconds(targetSec));
             _wpfOverlay.SeekRequested += targetSec => SafeInvoke(() => SeekToSeconds(targetSec));
             _wpfOverlay.MuteToggleRequested += () => SafeInvoke(() => ToggleVideoMute());
@@ -1916,6 +1927,8 @@ namespace LiteTube
             _prefetchTriggeredForCurrent = false;
             if (_wpfOverlay != null)
             {
+                _wpfOverlay.CancelAutoplayCountdown();
+                _wpfOverlay.SetLiveStreamMode(false);
                 _wpfOverlay.SetSponsorSegments(_currentSponsorSegments);
                 _wpfOverlay.SetVideoStoryboard(null);
             }
@@ -2132,6 +2145,8 @@ namespace LiteTube
             _prefetchTriggeredForCurrent = false;
             if (_wpfOverlay != null)
             {
+                _wpfOverlay.CancelAutoplayCountdown();
+                _wpfOverlay.SetLiveStreamMode(false);
                 _wpfOverlay.SetSponsorSegments(_currentSponsorSegments);
                 _wpfOverlay.SetVideoStoryboard(null);
                 _wpfOverlay.UpdatePlaybackState(false, 0.0, 0.0, video.DurationSeconds);
@@ -2139,22 +2154,25 @@ namespace LiteTube
             _catalogGridCards.PlayingVideoId = video.Id;
             _relatedRowCards.PlayingVideoId = video.Id;
 
-            // Carrega Storyboard (Sprite Sheets) em background para Hover Preview na barra de progresso
-            var _sbTask = Task.Run(async () =>
+            // Carrega Storyboard (Sprite Sheets) em background para Hover Preview na barra de progresso (exceto lives)
+            if (video.DurationSeconds > 0)
             {
-                try
+                var _sbTask = Task.Run(async () =>
                 {
-                    var sb = await StoryboardService.GetStoryboardAsync(video.Id, video.DurationSeconds).ConfigureAwait(false);
-                    SafeInvoke(() =>
+                    try
                     {
-                        if (_currentVideo != null && _currentVideo.Id == video.Id && _wpfOverlay != null)
+                        var sb = await StoryboardService.GetStoryboardAsync(video.Id, video.DurationSeconds).ConfigureAwait(false);
+                        SafeInvoke(() =>
                         {
-                            _wpfOverlay.SetVideoStoryboard(sb);
-                        }
-                    });
-                }
-                catch { }
-            });
+                            if (_currentVideo != null && _currentVideo.Id == video.Id && _wpfOverlay != null)
+                            {
+                                _wpfOverlay.SetVideoStoryboard(sb);
+                            }
+                        });
+                    }
+                    catch { }
+                });
+            }
 
             // Load YouTube Related / Recommended Videos in Watch Sidebar
             bool isExistingPlaylistTrack = (_openedPlaylistVideos != null && _openedPlaylistVideos.Count > 0 &&
@@ -2175,6 +2193,7 @@ namespace LiteTube
             string vUrl = null;
             string aUrl = null;
             string codec = "Direct";
+            bool isLiveStream = false;
 
             // Verifica se o vídeo já foi pré-resolvido em background (Gapless / Zero-Latency Handoff)
             if (_prefetchedVideoId == video.Id && _prefetchedStreams != null && !string.IsNullOrEmpty(_prefetchedStreams.Value.VideoUrl))
@@ -2183,6 +2202,8 @@ namespace LiteTube
                 vUrl = prefetched.VideoUrl;
                 aUrl = prefetched.AudioUrl;
                 codec = !string.IsNullOrEmpty(prefetched.Codec) ? prefetched.Codec : "Direct";
+                isLiveStream = vUrl.IndexOf(".m3u8", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                               vUrl.IndexOf("manifest.googlevideo.com", StringComparison.OrdinalIgnoreCase) >= 0;
 
                 _prefetchedVideoId = null;
                 _prefetchedStreams = null;
@@ -2232,13 +2253,41 @@ namespace LiteTube
                         _lblBufferBadge.Text = "❌ " + errMsg;
                         _lblLoadingProgress.Text = "❌ " + errMsg;
                         EmitStatus("❌ " + errMsg);
+                        _wpfOverlay?.ShowToast("❌ " + errMsg);
+
+                        if (session.IsVideoUnavailable)
+                        {
+                            string failedId = video.Id;
+                            var _ = Task.Run(async () =>
+                            {
+                                await Task.Delay(3000).ConfigureAwait(false);
+                                SafeInvoke(() =>
+                                {
+                                    if (_currentVideo != null && _currentVideo.Id == failedId && !_isPlaying)
+                                    {
+                                        var fallbackNext = GetNextVideoCandidate();
+                                        if (fallbackNext != null)
+                                        {
+                                            _wpfOverlay?.ShowToast("⏭️ Avançando para o próximo vídeo disponível...");
+                                            PlayVideo(fallbackNext);
+                                        }
+                                    }
+                                });
+                            });
+                        }
                         return;
                     }
 
                     vUrl = streamUrls[0];
                     aUrl = streamUrls.Length > 1 ? streamUrls[1] : null;
                     codec = streamUrls.Length > 2 ? streamUrls[2] : "Direct";
+                    isLiveStream = session.IsLiveStream;
                 }
+            }
+
+            if (_wpfOverlay != null)
+            {
+                _wpfOverlay.SetLiveStreamMode(isLiveStream);
             }
 
             ApplyVideoAudioSettings();
@@ -2251,7 +2300,7 @@ namespace LiteTube
                 _config.VideoQualityHeight, codec, (int)Math.Round(_config.VideoVolume * 100));
             EmitStatus(string.Format("▶ Assistindo ({0}p • Flyleaf): {1}", _config.VideoQualityHeight, video.Title));
 
-            if (_config.EnableSponsorBlock)
+            if (_config.EnableSponsorBlock && !isLiveStream)
             {
                 var _ = Task.Run(async () =>
                 {
@@ -2556,6 +2605,8 @@ namespace LiteTube
             if (_isLoading) return;
             if (_currentVideo == null || _player == null) return;
 
+            _wpfOverlay?.CancelAutoplayCountdown();
+
             try
             {
                 if (_config.AutoPauseMusicWhenVideoPlays && _musicEngine != null && _musicEngine.IsPlaying)
@@ -2588,6 +2639,7 @@ namespace LiteTube
 
         public void StopVideo()
         {
+            _wpfOverlay?.CancelAutoplayCountdown();
             StopProgressiveSession();
             try
             {
@@ -2814,6 +2866,7 @@ namespace LiteTube
         public void SeekToSeconds(double seconds)
         {
             if (_player == null) return;
+            _wpfOverlay?.CancelAutoplayCountdown();
             try
             {
                 double dur = TotalVideoDurationSeconds;

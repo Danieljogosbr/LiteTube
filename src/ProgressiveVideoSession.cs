@@ -27,6 +27,8 @@ namespace LiteTube
         private string _resolvedAudioUrl = null;
         private string _activeCodecName = "Direct3D 11 / FFmpeg";
         private string _lastResolveError = null;
+        private bool _isLiveStream = false;
+        private bool _isVideoUnavailable = false;
         private readonly SemaphoreSlim _resolveLock = new SemaphoreSlim(1, 1);
         private double _knownDurationSeconds = 0;
 
@@ -46,6 +48,8 @@ namespace LiteTube
         public string LastResolveError { get { return _lastResolveError; } }
         public double KnownDurationSeconds { get { return _knownDurationSeconds; } }
         public string ActiveCodecName { get { return _activeCodecName; } }
+        public bool IsLiveStream { get { return _isLiveStream; } }
+        public bool IsVideoUnavailable { get { return _isVideoUnavailable; } }
 
         public async Task<string[]> ResolveStreamUrlsAsync(CancellationToken token)
         {
@@ -176,27 +180,28 @@ namespace LiteTube
                 }
 
                 // Tentativa 2: Cliente Android (muda assinatura de bot)
-                if ((urls == null || urls.Length == 0) && !token.IsCancellationRequested)
+                if ((urls == null || urls.Length == 0) && !_isVideoUnavailable && !token.IsCancellationRequested)
                 {
                     Logger.Warn("STREAM", "Tentativa 1 falhou. Tentativa 2: yt-dlp com cliente android...");
                     string attempt2Args = jsArg + "--extractor-args \"youtube:player_client=android\" ";
                     urls = await Task.Run(() => RunYtDlpGetUrls(videoUrl, formatArg, sortArg, attempt2Args, token));
                 }
 
-                // Tentativa 3: Cliente iOS
-                if ((urls == null || urls.Length == 0) && !token.IsCancellationRequested)
+                // Tentativa 3: Cliente iOS (excelente suporte para Live Streams HLS e formatos diretos)
+                if ((urls == null || urls.Length == 0) && !_isVideoUnavailable && !token.IsCancellationRequested)
                 {
                     Logger.Warn("STREAM", "Tentativa 2 falhou. Tentativa 3: yt-dlp com cliente ios...");
                     string attempt3Args = jsArg + "--extractor-args \"youtube:player_client=ios\" ";
                     urls = await Task.Run(() => RunYtDlpGetUrls(videoUrl, formatArg, sortArg, attempt3Args, token));
                 }
 
-                // Tentativa 4: Cliente Web Padrão sem cookies adicionais
-                if ((urls == null || urls.Length == 0) && !token.IsCancellationRequested)
+                // Tentativa 4: Cliente Web Padrão / Live Stream HLS (sem player_skip=hls)
+                if ((urls == null || urls.Length == 0) && !_isVideoUnavailable && !token.IsCancellationRequested)
                 {
-                    Logger.Warn("STREAM", "Tentativa 3 falhou. Tentativa 4: yt-dlp cliente web padrão limpo...");
-                    string attempt4Args = jsArg;
-                    urls = await Task.Run(() => RunYtDlpGetUrls(videoUrl, formatArg, sortArg, attempt4Args, token));
+                    Logger.Warn("STREAM", "Tentativa 3 falhou. Tentativa 4: yt-dlp fallback Web / Live Stream HLS...");
+                    string liveFormatArg = string.Format("bestvideo[height<={0}]+bestaudio/best[height<={0}]/best", _height);
+                    string attempt4Args = (!string.IsNullOrEmpty(cookieArg) ? cookieArg : "") + jsArg;
+                    urls = await Task.Run(() => RunYtDlpGetUrls(videoUrl, liveFormatArg, sortArg, attempt4Args, token));
                 }
 
                 if (urls != null && urls.Length > 0 && !string.IsNullOrEmpty(urls[0]))
@@ -204,22 +209,34 @@ namespace LiteTube
                     _resolvedVideoUrl = urls[0];
                     _resolvedAudioUrl = urls.Length > 1 ? urls[1] : null;
 
+                    if (_resolvedVideoUrl.IndexOf(".m3u8", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        _resolvedVideoUrl.IndexOf("manifest.googlevideo.com", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        _isLiveStream = true;
+                    }
+
                     _activeCodecName = DetectCodecFromUrls(_resolvedVideoUrl, _resolvedAudioUrl);
                     int vItag = ExtractItag(_resolvedVideoUrl);
                     int aItag = ExtractItag(_resolvedAudioUrl);
 
-                    Logger.Info("STREAM", string.Format("Fluxos diretos obtidos em {0}ms: Video='{1}' (itag={2}), Audio='{3}' (itag={4}), Codec='{5}'",
+                    Logger.Info("STREAM", string.Format("Fluxos diretos obtidos em {0}ms: Video='{1}' (itag={2}), Audio='{3}' (itag={4}), Codec='{5}', Live={6}",
                         sw.ElapsedMilliseconds,
                         _resolvedVideoUrl.Substring(0, Math.Min(60, _resolvedVideoUrl.Length)) + "...",
                         vItag > 0 ? vItag.ToString() : "desconhecido",
                         _resolvedAudioUrl != null ? (_resolvedAudioUrl.Substring(0, Math.Min(60, _resolvedAudioUrl.Length)) + "...") : "embutido",
                         aItag > 0 ? aItag.ToString() : "desconhecido",
-                        _activeCodecName));
+                        _activeCodecName,
+                        _isLiveStream));
 
                     return true;
                 }
 
-                Logger.Error("STREAM", string.Format("Falha definitiva ao obter URLs com yt-dlp após {0}ms.", sw.ElapsedMilliseconds));
+                if (!_isVideoUnavailable)
+                {
+                    var _ = YtDlpResolver.EnsureUpdatedInBackgroundAsync(force: true);
+                }
+
+                Logger.Error("STREAM", string.Format("Falha definitiva ao obter URLs com yt-dlp após {0}ms (Unavailable={1}).", sw.ElapsedMilliseconds, _isVideoUnavailable));
                 return false;
             }
             finally
@@ -319,20 +336,36 @@ namespace LiteTube
                                 errJoined.IndexOf("members-only", StringComparison.OrdinalIgnoreCase) >= 0)
                             {
                                 _lastResolveError = "Vídeo exclusivo para membros do canal (requer assinatura no YouTube).";
+                                _isVideoUnavailable = true;
                             }
                             else if (errJoined.IndexOf("confirm your age", StringComparison.OrdinalIgnoreCase) >= 0 ||
                                      errJoined.IndexOf("age-restricted", StringComparison.OrdinalIgnoreCase) >= 0)
                             {
                                 _lastResolveError = "Vídeo com restrição de idade no YouTube.";
+                                _isVideoUnavailable = string.IsNullOrEmpty(GetCookieArg());
                             }
                             else if (errJoined.IndexOf("Private video", StringComparison.OrdinalIgnoreCase) >= 0)
                             {
                                 _lastResolveError = "Este vídeo é privado no YouTube.";
+                                _isVideoUnavailable = true;
+                            }
+                            else if (errJoined.IndexOf("Premieres in", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                     errJoined.IndexOf("live event will begin", StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                _lastResolveError = "Esta estreia ou transmissão ao vivo ainda não começou.";
+                                _isVideoUnavailable = true;
+                            }
+                            else if (errJoined.IndexOf("not available in your country", StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                _lastResolveError = "Este vídeo não está disponível no seu país.";
+                                _isVideoUnavailable = true;
                             }
                             else if (errJoined.IndexOf("Video unavailable", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                     errJoined.IndexOf("This video has been removed", StringComparison.OrdinalIgnoreCase) >= 0)
+                                     errJoined.IndexOf("This video has been removed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                     errJoined.IndexOf("This video is not available", StringComparison.OrdinalIgnoreCase) >= 0)
                             {
                                 _lastResolveError = "Vídeo indisponível ou removido do YouTube.";
+                                _isVideoUnavailable = true;
                             }
                         }
                     }
@@ -349,6 +382,12 @@ namespace LiteTube
         public static string DetectCodecFromUrls(string videoUrl, string audioUrl)
         {
             if (string.IsNullOrEmpty(videoUrl)) return "Direct3D 11 / FFmpeg";
+
+            if (videoUrl.IndexOf(".m3u8", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                videoUrl.IndexOf("manifest.googlevideo.com", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "LIVE HLS (Direct3D 11)";
+            }
 
             int videoItag = ExtractItag(videoUrl);
             int audioItag = ExtractItag(audioUrl);

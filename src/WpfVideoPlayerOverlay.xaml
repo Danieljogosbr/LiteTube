@@ -100,6 +100,118 @@
         </StackPanel>
     </Border>
 
+    <!-- Overlay de Reprodução Automática (Fim do Vídeo - Contagem Regressiva de 8s) -->
+    <Grid Name="AutoplayOverlay"
+          Background="#D9000000"
+          HorizontalAlignment="Stretch"
+          VerticalAlignment="Stretch"
+          IsHitTestVisible="True"
+          Visibility="Collapsed"
+          Panel.ZIndex="45">
+        <Border Background="#1C1C1E"
+                BorderBrush="#2C2C2E"
+                BorderThickness="1"
+                CornerRadius="8"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                MaxWidth="460"
+                MinWidth="360"
+                Padding="24">
+            <StackPanel Orientation="Vertical">
+                <TextBlock FontSize="13"
+                           Foreground="#AAAAAA"
+                           HorizontalAlignment="Center"
+                           FontFamily="Segoe UI"
+                           Text="Próximo vídeo em"/>
+
+                <!-- Contador Regressivo (Segundos) -->
+                <TextBlock Name="AutoplayCountdownText"
+                           FontSize="36"
+                           FontWeight="Bold"
+                           FontFamily="Segoe UI"
+                           Foreground="#FFFFFF"
+                           HorizontalAlignment="Center"
+                           Margin="0,4,0,16"
+                           Text="8"/>
+
+                <!-- Card de Prévia do Próximo Vídeo -->
+                <Grid Margin="0,0,0,20">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="140"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <Border Background="#111111"
+                            ClipToBounds="True"
+                            CornerRadius="4"
+                            Grid.Column="0"
+                            Width="140"
+                            Height="78">
+                        <Image Name="AutoplayNextThumbnail"
+                               RenderOptions.BitmapScalingMode="LowQuality"
+                               Stretch="UniformToFill"/>
+                    </Border>
+
+                    <StackPanel Grid.Column="1"
+                                Margin="12,0,0,0"
+                                VerticalAlignment="Center">
+                        <TextBlock Name="AutoplayNextTitle"
+                                   FontSize="13"
+                                   FontWeight="SemiBold"
+                                   FontFamily="Segoe UI Semibold"
+                                   Foreground="White"
+                                   MaxHeight="38"
+                                   Text="Título do Próximo Vídeo"
+                                   TextTrimming="CharacterEllipsis"
+                                   TextWrapping="Wrap"/>
+                        <TextBlock Name="AutoplayNextAuthor"
+                                   FontSize="12"
+                                   FontFamily="Segoe UI"
+                                   Foreground="#888888"
+                                   Margin="0,4,0,0"
+                                   Text="Nome do Canal"
+                                   TextTrimming="CharacterEllipsis"/>
+                    </StackPanel>
+                </Grid>
+
+                <!-- Barra de Progresso do Timer -->
+                <ProgressBar Name="AutoplayProgressBar"
+                             Background="#333333"
+                             BorderThickness="0"
+                             Foreground="#00A8FF"
+                             Height="3"
+                             Margin="0,0,0,20"
+                             Maximum="80"
+                             Minimum="0"
+                             Value="80"/>
+
+                <!-- Botões de Ação -->
+                <StackPanel HorizontalAlignment="Center" Orientation="Horizontal">
+                    <Button Name="BtnAutoplayCancel"
+                            Background="#2A2A2C"
+                            BorderThickness="0"
+                            Content="Cancelar"
+                            Cursor="Hand"
+                            Foreground="White"
+                            FontFamily="Segoe UI"
+                            Height="34"
+                            Margin="0,0,12,0"
+                            Width="110"/>
+                    <Button Name="BtnAutoplayPlayNow"
+                            Background="#0078D7"
+                            BorderThickness="0"
+                            Content="Reproduzir agora"
+                            Cursor="Hand"
+                            FontWeight="SemiBold"
+                            FontFamily="Segoe UI Semibold"
+                            Foreground="White"
+                            Height="34"
+                            Width="140"/>
+                </StackPanel>
+            </StackPanel>
+        </Border>
+    </Grid>
+
     <!-- Painel de Controles Inferior (YouTube Skin com Auto-Hide via DoubleAnimation) -->
     <Grid Name="ControlsContainerGrid"
           VerticalAlignment="Bottom"
