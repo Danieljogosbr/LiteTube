@@ -56,7 +56,11 @@ namespace LiteTube
         private Border _scrubberPlayedBar;
         private Ellipse _scrubberThumbHead;
         private Border _scrubberTooltipBorder;
+        private Border _scrubberPreviewImageBorder;
+        private System.Windows.Controls.Image _scrubberPreviewImage;
         private TextBlock _scrubberTooltipText;
+        private StoryboardData _activeStoryboard;
+        private double _lastHoveredMouseX = 0.0;
 
         // Transport & Volume elements
         private Border _btnPlayPause;
@@ -285,6 +289,8 @@ namespace LiteTube
             _scrubberPlayedBar = FindElement<Border>("ScrubberPlayedBar");
             _scrubberThumbHead = FindElement<Ellipse>("ScrubberThumbHead");
             _scrubberTooltipBorder = FindElement<Border>("ScrubberTooltipBorder");
+            _scrubberPreviewImageBorder = FindElement<Border>("ScrubberPreviewImageBorder");
+            _scrubberPreviewImage = FindElement<System.Windows.Controls.Image>("ScrubberPreviewImage");
             _scrubberTooltipText = FindElement<TextBlock>("ScrubberTooltipText");
 
             _btnPlayPause = FindElement<Border>("BtnPlayPause");
@@ -841,6 +847,7 @@ namespace LiteTube
         private void UpdateScrubberHoverAndDrag(double mouseX)
         {
             if (_scrubberHitArea == null) return;
+            _lastHoveredMouseX = mouseX;
             double trackW = Math.Max(1.0, _scrubberHitArea.ActualWidth);
             double clampedX = Math.Max(0.0, Math.Min(trackW, mouseX));
             double ratio = clampedX / trackW;
@@ -866,6 +873,23 @@ namespace LiteTube
                     ? string.Format("{0} • {1}", timeLabel, segName)
                     : timeLabel;
 
+                if (_scrubberPreviewImageBorder != null && _scrubberPreviewImage != null)
+                {
+                    var previewBmp = _activeStoryboard != null
+                        ? _activeStoryboard.TryGetFrame(targetSec, _totalSeconds, OnStoryboardSheetReady)
+                        : null;
+
+                    if (previewBmp != null)
+                    {
+                        _scrubberPreviewImage.Source = previewBmp;
+                        _scrubberPreviewImageBorder.Visibility = Visibility.Visible;
+                    }
+                    else
+                    {
+                        _scrubberPreviewImageBorder.Visibility = Visibility.Collapsed;
+                    }
+                }
+
                 _scrubberTooltipBorder.Visibility = Visibility.Visible;
                 _scrubberTooltipBorder.UpdateLayout();
 
@@ -873,6 +897,46 @@ namespace LiteTube
                 double leftPos = 14.0 + clampedX - (tipW / 2.0);
                 double maxLeft = Math.Max(14.0, (_controlsContainerGrid != null ? _controlsContainerGrid.ActualWidth : trackW) - tipW - 14.0);
                 Canvas.SetLeft(_scrubberTooltipBorder, Math.Max(14.0, Math.Min(maxLeft, leftPos)));
+            }
+        }
+
+        private void OnStoryboardSheetReady()
+        {
+            if (_isDisposed || _rootContent == null) return;
+            try
+            {
+                _rootContent.Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if ((_isHoveringScrubber || _isDraggingScrubber) &&
+                        _scrubberTooltipBorder != null &&
+                        _scrubberTooltipBorder.Visibility == Visibility.Visible)
+                    {
+                        UpdateScrubberHoverAndDrag(_lastHoveredMouseX);
+                    }
+                }), DispatcherPriority.Render);
+            }
+            catch { }
+        }
+
+        public void SetVideoStoryboard(StoryboardData storyboard)
+        {
+            _activeStoryboard = storyboard;
+            if (_rootContent != null)
+            {
+                _rootContent.Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (storyboard == null)
+                    {
+                        if (_scrubberPreviewImage != null) _scrubberPreviewImage.Source = null;
+                        if (_scrubberPreviewImageBorder != null) _scrubberPreviewImageBorder.Visibility = Visibility.Collapsed;
+                    }
+                    else if ((_isHoveringScrubber || _isDraggingScrubber) &&
+                             _scrubberTooltipBorder != null &&
+                             _scrubberTooltipBorder.Visibility == Visibility.Visible)
+                    {
+                        UpdateScrubberHoverAndDrag(_lastHoveredMouseX);
+                    }
+                }));
             }
         }
 

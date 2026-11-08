@@ -136,6 +136,12 @@ namespace LiteTube
         private TrackItem _currentVideo;
         private ProgressiveVideoSession _activeProgressiveSession;
 
+        // Next Video Background Pre-resolution (Gapless / Zero-Latency Handoff)
+        private string _prefetchedVideoId = null;
+        private (string VideoUrl, string AudioUrl, string Codec)? _prefetchedStreams = null;
+        private bool _isPrefetching = false;
+        private bool _prefetchTriggeredForCurrent = false;
+
         private bool _isPlaying = false;
         private bool _isSwitchingQuality = false;
         private bool _isLoading = false;
@@ -1905,7 +1911,14 @@ namespace LiteTube
             }
             _currentSponsorSegments = new List<SponsorSegment>();
             _lastSkippedSponsorUuid = null;
-            if (_wpfOverlay != null) _wpfOverlay.SetSponsorSegments(_currentSponsorSegments);
+            _prefetchedVideoId = null;
+            _prefetchedStreams = null;
+            _prefetchTriggeredForCurrent = false;
+            if (_wpfOverlay != null)
+            {
+                _wpfOverlay.SetSponsorSegments(_currentSponsorSegments);
+                _wpfOverlay.SetVideoStoryboard(null);
+            }
 
             // 4. Alterna visibilidade para o catálogo
             _watchPagePanel.Visible = false;
@@ -2116,13 +2129,32 @@ namespace LiteTube
             _currentVideo = video;
             _currentSponsorSegments = new List<SponsorSegment>();
             _lastSkippedSponsorUuid = null;
+            _prefetchTriggeredForCurrent = false;
             if (_wpfOverlay != null)
             {
                 _wpfOverlay.SetSponsorSegments(_currentSponsorSegments);
+                _wpfOverlay.SetVideoStoryboard(null);
                 _wpfOverlay.UpdatePlaybackState(false, 0.0, 0.0, video.DurationSeconds);
             }
             _catalogGridCards.PlayingVideoId = video.Id;
             _relatedRowCards.PlayingVideoId = video.Id;
+
+            // Carrega Storyboard (Sprite Sheets) em background para Hover Preview na barra de progresso
+            var _sbTask = Task.Run(async () =>
+            {
+                try
+                {
+                    var sb = await StoryboardService.GetStoryboardAsync(video.Id, video.DurationSeconds).ConfigureAwait(false);
+                    SafeInvoke(() =>
+                    {
+                        if (_currentVideo != null && _currentVideo.Id == video.Id && _wpfOverlay != null)
+                        {
+                            _wpfOverlay.SetVideoStoryboard(sb);
+                        }
+                    });
+                }
+                catch { }
+            });
 
             // Load YouTube Related / Recommended Videos in Watch Sidebar
             bool isExistingPlaylistTrack = (_openedPlaylistVideos != null && _openedPlaylistVideos.Count > 0 &&
@@ -2133,95 +2165,118 @@ namespace LiteTube
                 LoadRelatedVideosForPlayingVideoAsync(video.Id);
             }
 
-            if (_player != null)
-            {
-                _player.Stop();
-            }
-
-            _isPlaying = false;
-            _isLoading = true;
-            UpdatePlayPauseButton();
-            UpdateSaveVideoButton();
-
             _lblVideoTitle.Text = video.Title;
             _lblVideoChannel.Text = !string.IsNullOrEmpty(video.Artist) ? video.Artist : "Canal do YouTube";
             _lblVideoSubInfo.Text = string.Format("Qualidade {0}p  •  Volume: {1}%",
                 _config.VideoQualityHeight, (int)Math.Round(_config.VideoVolume * 100));
             _picWatchChannelAvatar.Invalidate();
+            UpdateSaveVideoButton();
 
-            CenterLoadingOverlay();
-            _lblLoadingTitle.Text = video.Title;
-            _lblLoadingProgress.Text = "Conectando ao YouTube (FlyleafLib Direct3D 11)...";
-            _loadingOverlay.Visible = true;
-            _loadingOverlay.BringToFront();
+            string vUrl = null;
+            string aUrl = null;
+            string codec = "Direct";
 
-            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
-            string binDir = Path.Combine(baseDir, "bin");
-
-            var session = new ProgressiveVideoSession(video, _config.VideoQualityHeight, binDir, _config.BrowserForCookies, _config.CookiesFilePath);
-            _activeProgressiveSession = session;
-
-            using (var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(30)))
+            // Verifica se o vídeo já foi pré-resolvido em background (Gapless / Zero-Latency Handoff)
+            if (_prefetchedVideoId == video.Id && _prefetchedStreams != null && !string.IsNullOrEmpty(_prefetchedStreams.Value.VideoUrl))
             {
-                var streamUrls = await session.ResolveStreamUrlsAsync(cts.Token);
-                if (_activeProgressiveSession != session) return;
+                var prefetched = _prefetchedStreams.Value;
+                vUrl = prefetched.VideoUrl;
+                aUrl = prefetched.AudioUrl;
+                codec = !string.IsNullOrEmpty(prefetched.Codec) ? prefetched.Codec : "Direct";
 
+                _prefetchedVideoId = null;
+                _prefetchedStreams = null;
                 _loadingOverlay.Visible = false;
                 _isLoading = false;
 
-                if (streamUrls == null || string.IsNullOrEmpty(streamUrls[0]))
+                Logger.Info("PREFETCH", string.Format("Transição Gapless (Zero-Latency Handoff) ativada para Id={0} ({1})", video.Id, codec));
+            }
+            else
+            {
+                _prefetchedVideoId = null;
+                _prefetchedStreams = null;
+
+                if (_player != null)
                 {
-                    UpdatePlayPauseButton();
-                    string errMsg = !string.IsNullOrEmpty(session.LastResolveError)
-                        ? session.LastResolveError
-                        : "Não foi possível obter os fluxos de streaming deste vídeo.";
-                    _lblBufferBadge.Text = "❌ " + errMsg;
-                    _lblLoadingProgress.Text = "❌ " + errMsg;
-                    EmitStatus("❌ " + errMsg);
-                    return;
+                    _player.Stop();
                 }
 
-                string vUrl = streamUrls[0];
-                string aUrl = streamUrls.Length > 1 ? streamUrls[1] : null;
-                string codec = streamUrls.Length > 2 ? streamUrls[2] : "Direct";
-
-                ApplyVideoAudioSettings();
-                await PlayStreamAsync(vUrl, aUrl, video.DurationSeconds, 0.0);
-
-                _isPlaying = true;
+                _isPlaying = false;
+                _isLoading = true;
                 UpdatePlayPauseButton();
-                _lblBufferBadge.Text = string.Format("▶ Flyleaf D3D11 ({0})", codec);
-                _lblVideoSubInfo.Text = string.Format("Qualidade {0}p ({1})  •  Flyleaf Direct3D 11  •  Volume: {2}%",
-                    _config.VideoQualityHeight, codec, (int)Math.Round(_config.VideoVolume * 100));
-                EmitStatus(string.Format("▶ Assistindo ({0}p • Flyleaf): {1}", _config.VideoQualityHeight, video.Title));
 
-                if (_config.EnableSponsorBlock)
+                CenterLoadingOverlay();
+                _lblLoadingTitle.Text = video.Title;
+                _lblLoadingProgress.Text = "Conectando ao YouTube (FlyleafLib Direct3D 11)...";
+                _loadingOverlay.Visible = true;
+                _loadingOverlay.BringToFront();
+
+                string binDir = YtDlpResolver.GetYtDlpDirectory();
+                var session = new ProgressiveVideoSession(video, _config.VideoQualityHeight, binDir, _config.BrowserForCookies, _config.CookiesFilePath);
+                _activeProgressiveSession = session;
+
+                using (var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(30)))
                 {
-                    var _ = Task.Run(async () =>
+                    var streamUrls = await session.ResolveStreamUrlsAsync(cts.Token);
+                    if (_activeProgressiveSession != session) return;
+
+                    _loadingOverlay.Visible = false;
+                    _isLoading = false;
+
+                    if (streamUrls == null || string.IsNullOrEmpty(streamUrls[0]))
                     {
-                        try
-                        {
-                            var segs = await SponsorBlockService.GetVideoSegmentsAsync(video.Id);
-                            SafeInvoke(() =>
-                            {
-                                if (_currentVideo != null && _currentVideo.Id == video.Id && segs != null)
-                                {
-                                    _currentSponsorSegments = segs;
-                                    if (_wpfOverlay != null)
-                                    {
-                                        _wpfOverlay.SetSponsorSegments(_currentSponsorSegments);
-                                    }
-                                    if (_currentSponsorSegments.Count > 0)
-                                    {
-                                        _lblBufferBadge.Text = string.Format("🛡️ {0} trecho(s) mapeados (SponsorBlock)", _currentSponsorSegments.Count);
-                                        Logger.Info("SPONSORBLOCK", string.Format("SponsorBlock: {0} trechos carregados para {1}", _currentSponsorSegments.Count, video.Title));
-                                    }
-                                }
-                            });
-                        }
-                        catch { }
-                    });
+                        UpdatePlayPauseButton();
+                        string errMsg = !string.IsNullOrEmpty(session.LastResolveError)
+                            ? session.LastResolveError
+                            : "Não foi possível obter os fluxos de streaming deste vídeo.";
+                        _lblBufferBadge.Text = "❌ " + errMsg;
+                        _lblLoadingProgress.Text = "❌ " + errMsg;
+                        EmitStatus("❌ " + errMsg);
+                        return;
+                    }
+
+                    vUrl = streamUrls[0];
+                    aUrl = streamUrls.Length > 1 ? streamUrls[1] : null;
+                    codec = streamUrls.Length > 2 ? streamUrls[2] : "Direct";
                 }
+            }
+
+            ApplyVideoAudioSettings();
+            await PlayStreamAsync(vUrl, aUrl, video.DurationSeconds, 0.0);
+
+            _isPlaying = true;
+            UpdatePlayPauseButton();
+            _lblBufferBadge.Text = string.Format("▶ Flyleaf D3D11 ({0})", codec);
+            _lblVideoSubInfo.Text = string.Format("Qualidade {0}p ({1})  •  Flyleaf Direct3D 11  •  Volume: {2}%",
+                _config.VideoQualityHeight, codec, (int)Math.Round(_config.VideoVolume * 100));
+            EmitStatus(string.Format("▶ Assistindo ({0}p • Flyleaf): {1}", _config.VideoQualityHeight, video.Title));
+
+            if (_config.EnableSponsorBlock)
+            {
+                var _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        var segs = await SponsorBlockService.GetVideoSegmentsAsync(video.Id);
+                        SafeInvoke(() =>
+                        {
+                            if (_currentVideo != null && _currentVideo.Id == video.Id && segs != null)
+                            {
+                                _currentSponsorSegments = segs;
+                                if (_wpfOverlay != null)
+                                {
+                                    _wpfOverlay.SetSponsorSegments(_currentSponsorSegments);
+                                }
+                                if (_currentSponsorSegments.Count > 0)
+                                {
+                                    _lblBufferBadge.Text = string.Format("🛡️ {0} trecho(s) mapeados (SponsorBlock)", _currentSponsorSegments.Count);
+                                    Logger.Info("SPONSORBLOCK", string.Format("SponsorBlock: {0} trechos carregados para {1}", _currentSponsorSegments.Count, video.Title));
+                                }
+                            }
+                        });
+                    }
+                    catch { }
+                });
             }
         }
 
@@ -2597,6 +2652,11 @@ namespace LiteTube
             _config.Save();
             UpdateQualityButtons();
 
+            // Invalida o cache de pré-fetch do próximo vídeo para re-resolver na nova qualidade selecionada
+            _prefetchedVideoId = null;
+            _prefetchedStreams = null;
+            _prefetchTriggeredForCurrent = false;
+
             string qLabel = targetHeight >= 2160 ? "4K" : string.Format("{0}p", targetHeight);
             _wpfOverlay?.ShowToast(string.Format("Alternando para {0}...", qLabel));
 
@@ -2793,6 +2853,16 @@ namespace LiteTube
             }
 
             _wpfOverlay.UpdatePlaybackState(playing, cur, buf, tot);
+
+            // Pré-resolução em background do próximo vídeo quando próximo ao fim ou após estabilizar o buffer
+            if (playing && tot > 0 && !_prefetchTriggeredForCurrent && !_isPrefetching)
+            {
+                double remaining = tot - cur;
+                if (remaining <= 30.0 || cur >= 10.0)
+                {
+                    TriggerNextVideoPrefetch();
+                }
+            }
 
             // Auto-Skip do SponsorBlock
             if (_config.EnableSponsorBlock && _config.AutoSkipSponsors && playing && !_wpfOverlay.IsUserDraggingScrubber && _currentSponsorSegments != null && _currentSponsorSegments.Count > 0)
@@ -3166,26 +3236,108 @@ namespace LiteTube
             }
         }
 
-        private void PlayNextVideo()
+        private TrackItem GetNextVideoCandidate()
         {
             if (_openedPlaylistVideos != null && _openedPlaylistVideos.Count > 0 && _currentVideo != null)
             {
                 int idx = _openedPlaylistVideos.FindIndex(x => x.Id == _currentVideo.Id);
                 if (idx >= 0 && idx + 1 < _openedPlaylistVideos.Count)
                 {
-                    PlayVideo(_openedPlaylistVideos[idx + 1]);
-                    return;
+                    return _openedPlaylistVideos[idx + 1];
                 }
             }
 
             if (_relatedRowCards != null && _relatedRowCards.Items != null && _relatedRowCards.Items.Count > 0)
             {
-                var next = _relatedRowCards.Items.Find(x => x.Id != (_currentVideo != null ? _currentVideo.Id : ""));
+                string curId = _currentVideo != null ? _currentVideo.Id : "";
+                var next = _relatedRowCards.Items.Find(x => x != null && !x.IsChannel && !x.IsPlaylistCard && x.Id != curId);
                 if (next != null)
                 {
-                    PlayVideo(next);
-                    return;
+                    return next;
                 }
+            }
+
+            return null;
+        }
+
+        private void TriggerNextVideoPrefetch()
+        {
+            if (_isPrefetching || _prefetchTriggeredForCurrent || _currentVideo == null)
+                return;
+
+            var nextVideo = GetNextVideoCandidate();
+            if (nextVideo == null || string.IsNullOrEmpty(nextVideo.Id))
+                return;
+
+            if (_prefetchedVideoId == nextVideo.Id && _prefetchedStreams != null && !string.IsNullOrEmpty(_prefetchedStreams.Value.VideoUrl))
+            {
+                _prefetchTriggeredForCurrent = true;
+                return;
+            }
+
+            _isPrefetching = true;
+            _prefetchTriggeredForCurrent = true;
+            int targetQuality = _config.VideoQualityHeight;
+            string currentPlayingId = _currentVideo.Id;
+
+            var _ = Task.Run(async () =>
+            {
+                try
+                {
+                    Logger.Info("PREFETCH", string.Format("Iniciando pré-resolução em background do próximo vídeo: Id={0}, Title='{1}' ({2}p)",
+                        nextVideo.Id, nextVideo.Title, targetQuality));
+
+                    string binDir = YtDlpResolver.GetYtDlpDirectory();
+                    using (var prefetchSession = new ProgressiveVideoSession(
+                        nextVideo,
+                        targetQuality,
+                        binDir,
+                        _config.BrowserForCookies,
+                        _config.CookiesFilePath))
+                    {
+                        using (var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(25)))
+                        {
+                            var urls = await prefetchSession.ResolveStreamUrlsAsync(cts.Token).ConfigureAwait(false);
+                            if (urls != null && urls.Length > 0 && !string.IsNullOrEmpty(urls[0]))
+                            {
+                                string vUrl = urls[0];
+                                string aUrl = urls.Length > 1 ? urls[1] : "";
+                                string codec = urls.Length > 2 ? urls[2] : "Direct";
+
+                                SafeInvoke(() =>
+                                {
+                                    if (_currentVideo != null && _currentVideo.Id == currentPlayingId && _config.VideoQualityHeight == targetQuality)
+                                    {
+                                        _prefetchedVideoId = nextVideo.Id;
+                                        _prefetchedStreams = (vUrl, aUrl, codec);
+                                        Logger.Info("PREFETCH", string.Format("Próximo vídeo pré-resolvido e pronto em cache (Zero-Latency Handoff): Id={0} ({1})",
+                                            nextVideo.Id, codec));
+                                    }
+                                });
+                            }
+                        }
+                    }
+
+                    // Também antecipa o Storyboard do próximo vídeo em background
+                    await StoryboardService.GetStoryboardAsync(nextVideo.Id, nextVideo.DurationSeconds).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn("PREFETCH", "Falha silenciosa no pré-fetch do próximo vídeo: " + ex.Message);
+                }
+                finally
+                {
+                    SafeInvoke(() => { _isPrefetching = false; });
+                }
+            });
+        }
+
+        private void PlayNextVideo()
+        {
+            var next = GetNextVideoCandidate();
+            if (next != null)
+            {
+                PlayVideo(next);
             }
         }
 

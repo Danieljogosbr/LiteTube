@@ -2361,6 +2361,15 @@ namespace LiteTube
                 Logger.Info("SELFTEST", string.Format("Otimizações de Boot, Apontamento FFmpeg e Downsampling WPF validados: YtDlpAvailable={0} | FFmpegValid={1} ('{2}') | NativeDownsample={3}.",
                     ytResolverOk, ffmpegDirValid, Path.GetFileName(ffmpegResolvedDir), downsampleSupported));
 
+                // 6.1 Validação de StoryboardSpec Parser (Scrubber Hover Preview)
+                string mockSpec = "https://i.ytimg.com/sb/dQw4w9WgXcQ/storyboard3_L$L/$N.jpg?sqp=-oaymwENSDfyq4qpAwVwAcABBqLzl_8DBgi|48#27#100#10#10#0#default#rs$AOn4CLA1|80#45#106#10#10#2000#M$M#rs$AOn4CLA2|160#90#106#5#5#2000#M$M#rs$AOn4CLA3";
+                var parsedSb = StoryboardService.ParseSpec("dQw4w9WgXcQ", mockSpec, 212.0);
+                bool sbValid = parsedSb != null && parsedSb.FrameWidth == 160 && parsedSb.FrameHeight == 90 && parsedSb.Columns == 5 && parsedSb.Rows == 5;
+                string sheetUrl0 = parsedSb != null ? parsedSb.GetSheetUrl(0) : "";
+                int frameAt60s = parsedSb != null ? parsedSb.GetFrameIndex(60.0, 212.0) : -1;
+                Logger.Info("SELFTEST", string.Format("Storyboard Hover Preview e Gapless Prefetch validados: StoryboardValid={0} ({1}x{2}, Frame@60s={3}, Sheet0='{4}').",
+                    sbValid, parsedSb != null ? parsedSb.FrameWidth : 0, parsedSb != null ? parsedSb.FrameHeight : 0, frameAt60s, sheetUrl0));
+
                 // 7. Validação do ExternalLinkServer (Listener HTTP na porta 48125: rotas /ping e /play)
                 bool serverPingOk = false;
                 string pingResponse = "";

@@ -120,21 +120,41 @@
             <RowDefinition Height="48"/> <!-- Buttons Row -->
         </Grid.RowDefinitions>
 
-        <!-- Tooltip Flutuante Escuro com Cantos Arredondados na Barra de Progresso -->
-        <Canvas Name="TooltipCanvas" Grid.Row="0" IsHitTestVisible="False">
+        <!-- Tooltip Flutuante com Storyboard Preview e Minutagem na Barra de Progresso -->
+        <Canvas Name="TooltipCanvas" Grid.Row="0" ClipToBounds="False" IsHitTestVisible="False" Panel.ZIndex="40">
             <Border Name="ScrubberTooltipBorder"
-                    Background="#E6161616"
-                    BorderBrush="#33FFFFFF"
+                    Background="#F0141414"
+                    BorderBrush="#40FFFFFF"
                     BorderThickness="1"
-                    CornerRadius="4"
-                    Padding="7,3"
+                    CornerRadius="6"
+                    Padding="5,5,5,4"
                     Visibility="Collapsed"
-                    Canvas.Top="2">
-                <TextBlock Name="ScrubberTooltipText"
-                           Text="0:00"
-                           Foreground="#FFFFFF"
-                           FontFamily="Segoe UI Semibold"
-                           FontSize="11.5"/>
+                    Canvas.Bottom="4">
+                <StackPanel Orientation="Vertical" HorizontalAlignment="Center">
+                    <Border Name="ScrubberPreviewImageBorder"
+                            Width="160"
+                            Height="90"
+                            CornerRadius="4"
+                            Margin="0,0,0,4"
+                            Background="#FF0A0A0A"
+                            BorderBrush="#26FFFFFF"
+                            BorderThickness="1"
+                            ClipToBounds="True"
+                            Visibility="Collapsed">
+                        <Image Name="ScrubberPreviewImage"
+                               Width="160"
+                               Height="90"
+                               Stretch="Fill"
+                               RenderOptions.BitmapScalingMode="LowQuality"/>
+                    </Border>
+                    <TextBlock Name="ScrubberTooltipText"
+                               Text="0:00"
+                               Foreground="#FFFFFF"
+                               FontFamily="Segoe UI Semibold"
+                               FontSize="11.5"
+                               HorizontalAlignment="Center"
+                               Margin="3,0,3,0"/>
+                </StackPanel>
             </Border>
         </Canvas>
 
