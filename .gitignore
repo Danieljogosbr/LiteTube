@@ -2,6 +2,8 @@
 data/
 logs/
 .tmp.driveupload/
+.tmp.drivedownload/
+bin/yt-dlp.lastupdate
 
 # Arquivos e pastas de compilação temporários e depuração
 bin/Debug/
