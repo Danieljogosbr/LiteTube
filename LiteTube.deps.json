@@ -1,0 +1,416 @@
+{
+  "runtimeTarget": {
+    "name": ".NETCoreApp,Version=v8.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    ".NETCoreApp,Version=v8.0": {
+      "LiteTube/1.0.0": {
+        "dependencies": {
+          "FlyleafLib": "3.7.55"
+        },
+        "runtime": {
+          "LiteTube.dll": {}
+        }
+      },
+      "FFmpeg.AutoGen/5.1.2.1": {
+        "runtime": {
+          "lib/netstandard2.1/FFmpeg.AutoGen.dll": {
+            "assemblyVersion": "5.1.2.1",
+            "fileVersion": "5.1.2.1"
+          }
+        }
+      },
+      "FlyleafLib/3.7.55": {
+        "dependencies": {
+          "FFmpeg.AutoGen": "5.1.2.1",
+          "Microsoft.Extensions.Logging": "9.0.0-rc.1.24431.7",
+          "Vortice.D3DCompiler": "2.4.2",
+          "Vortice.Direct3D11": "2.4.2",
+          "Vortice.DirectComposition": "2.4.2",
+          "Vortice.Mathematics": "1.4.26",
+          "Vortice.MediaFoundation": "2.4.2",
+          "Vortice.XAudio2": "2.4.2"
+        },
+        "runtime": {
+          "lib/net8.0-windows7.0/FlyleafLib.dll": {
+            "assemblyVersion": "3.7.55.0",
+            "fileVersion": "3.7.55.0"
+          }
+        }
+      },
+      "Microsoft.Extensions.DependencyInjection/9.0.0-rc.1.24431.7": {
+        "dependencies": {
+          "Microsoft.Extensions.DependencyInjection.Abstractions": "9.0.0-rc.1.24431.7"
+        },
+        "runtime": {
+          "lib/net8.0/Microsoft.Extensions.DependencyInjection.dll": {
+            "assemblyVersion": "9.0.0.0",
+            "fileVersion": "9.0.24.43107"
+          }
+        }
+      },
+      "Microsoft.Extensions.DependencyInjection.Abstractions/9.0.0-rc.1.24431.7": {
+        "runtime": {
+          "lib/net8.0/Microsoft.Extensions.DependencyInjection.Abstractions.dll": {
+            "assemblyVersion": "9.0.0.0",
+            "fileVersion": "9.0.24.43107"
+          }
+        }
+      },
+      "Microsoft.Extensions.Logging/9.0.0-rc.1.24431.7": {
+        "dependencies": {
+          "Microsoft.Extensions.DependencyInjection": "9.0.0-rc.1.24431.7",
+          "Microsoft.Extensions.Logging.Abstractions": "9.0.0-rc.1.24431.7",
+          "Microsoft.Extensions.Options": "9.0.0-rc.1.24431.7"
+        },
+        "runtime": {
+          "lib/net8.0/Microsoft.Extensions.Logging.dll": {
+            "assemblyVersion": "9.0.0.0",
+            "fileVersion": "9.0.24.43107"
+          }
+        }
+      },
+      "Microsoft.Extensions.Logging.Abstractions/9.0.0-rc.1.24431.7": {
+        "dependencies": {
+          "Microsoft.Extensions.DependencyInjection.Abstractions": "9.0.0-rc.1.24431.7",
+          "System.Diagnostics.DiagnosticSource": "9.0.0-rc.1.24431.7"
+        },
+        "runtime": {
+          "lib/net8.0/Microsoft.Extensions.Logging.Abstractions.dll": {
+            "assemblyVersion": "9.0.0.0",
+            "fileVersion": "9.0.24.43107"
+          }
+        }
+      },
+      "Microsoft.Extensions.Options/9.0.0-rc.1.24431.7": {
+        "dependencies": {
+          "Microsoft.Extensions.DependencyInjection.Abstractions": "9.0.0-rc.1.24431.7",
+          "Microsoft.Extensions.Primitives": "9.0.0-rc.1.24431.7"
+        },
+        "runtime": {
+          "lib/net8.0/Microsoft.Extensions.Options.dll": {
+            "assemblyVersion": "9.0.0.0",
+            "fileVersion": "9.0.24.43107"
+          }
+        }
+      },
+      "Microsoft.Extensions.Primitives/9.0.0-rc.1.24431.7": {
+        "runtime": {
+          "lib/net8.0/Microsoft.Extensions.Primitives.dll": {
+            "assemblyVersion": "9.0.0.0",
+            "fileVersion": "9.0.24.43107"
+          }
+        }
+      },
+      "PolySharp/1.10.0": {},
+      "SharpGen.Runtime/2.0.0-beta.13": {
+        "dependencies": {
+          "PolySharp": "1.10.0"
+        },
+        "runtime": {
+          "lib/net7.0/SharpGen.Runtime.dll": {
+            "assemblyVersion": "2.0.0.0",
+            "fileVersion": "2.0.0.0"
+          }
+        }
+      },
+      "SharpGen.Runtime.COM/2.0.0-beta.13": {
+        "dependencies": {
+          "PolySharp": "1.10.0",
+          "SharpGen.Runtime": "2.0.0-beta.13"
+        },
+        "runtime": {
+          "lib/net7.0/SharpGen.Runtime.COM.dll": {
+            "assemblyVersion": "2.0.0.0",
+            "fileVersion": "2.0.0.0"
+          }
+        }
+      },
+      "System.Diagnostics.DiagnosticSource/9.0.0-rc.1.24431.7": {
+        "runtime": {
+          "lib/net8.0/System.Diagnostics.DiagnosticSource.dll": {
+            "assemblyVersion": "9.0.0.0",
+            "fileVersion": "9.0.24.43107"
+          }
+        }
+      },
+      "Vortice.D3DCompiler/2.4.2": {
+        "dependencies": {
+          "SharpGen.Runtime": "2.0.0-beta.13",
+          "SharpGen.Runtime.COM": "2.0.0-beta.13",
+          "Vortice.DirectX": "2.4.2",
+          "Vortice.Mathematics": "1.4.26"
+        },
+        "runtime": {
+          "lib/net6.0/Vortice.D3DCompiler.dll": {
+            "assemblyVersion": "2.4.2.0",
+            "fileVersion": "2.4.2.0"
+          }
+        }
+      },
+      "Vortice.Direct2D1/2.4.2": {
+        "dependencies": {
+          "SharpGen.Runtime": "2.0.0-beta.13",
+          "SharpGen.Runtime.COM": "2.0.0-beta.13",
+          "Vortice.DXGI": "2.4.2",
+          "Vortice.Mathematics": "1.4.26"
+        },
+        "runtime": {
+          "lib/net6.0/Vortice.Direct2D1.dll": {
+            "assemblyVersion": "2.4.2.0",
+            "fileVersion": "2.4.2.0"
+          }
+        }
+      },
+      "Vortice.Direct3D11/2.4.2": {
+        "dependencies": {
+          "SharpGen.Runtime": "2.0.0-beta.13",
+          "SharpGen.Runtime.COM": "2.0.0-beta.13",
+          "Vortice.DXGI": "2.4.2",
+          "Vortice.Mathematics": "1.4.26"
+        },
+        "runtime": {
+          "lib/net6.0/Vortice.Direct3D11.dll": {
+            "assemblyVersion": "2.4.2.0",
+            "fileVersion": "2.4.2.0"
+          }
+        }
+      },
+      "Vortice.DirectComposition/2.4.2": {
+        "dependencies": {
+          "SharpGen.Runtime": "2.0.0-beta.13",
+          "SharpGen.Runtime.COM": "2.0.0-beta.13",
+          "Vortice.DXGI": "2.4.2",
+          "Vortice.Direct2D1": "2.4.2",
+          "Vortice.DirectX": "2.4.2",
+          "Vortice.Mathematics": "1.4.26"
+        },
+        "runtime": {
+          "lib/net6.0/Vortice.DirectComposition.dll": {
+            "assemblyVersion": "2.4.2.0",
+            "fileVersion": "2.4.2.0"
+          }
+        }
+      },
+      "Vortice.DirectX/2.4.2": {
+        "dependencies": {
+          "SharpGen.Runtime": "2.0.0-beta.13",
+          "SharpGen.Runtime.COM": "2.0.0-beta.13",
+          "Vortice.Mathematics": "1.4.26"
+        },
+        "runtime": {
+          "lib/net7.0/Vortice.DirectX.dll": {
+            "assemblyVersion": "2.4.2.0",
+            "fileVersion": "2.4.2.0"
+          }
+        }
+      },
+      "Vortice.DXGI/2.4.2": {
+        "dependencies": {
+          "SharpGen.Runtime": "2.0.0-beta.13",
+          "SharpGen.Runtime.COM": "2.0.0-beta.13",
+          "Vortice.DirectX": "2.4.2",
+          "Vortice.Mathematics": "1.4.26"
+        },
+        "runtime": {
+          "lib/net6.0/Vortice.DXGI.dll": {
+            "assemblyVersion": "2.4.2.0",
+            "fileVersion": "2.4.2.0"
+          }
+        }
+      },
+      "Vortice.Mathematics/1.4.26": {
+        "runtime": {
+          "lib/net7.0/Vortice.Mathematics.dll": {
+            "assemblyVersion": "1.4.0.0",
+            "fileVersion": "1.4.26.47787"
+          }
+        }
+      },
+      "Vortice.MediaFoundation/2.4.2": {
+        "dependencies": {
+          "SharpGen.Runtime": "2.0.0-beta.13",
+          "SharpGen.Runtime.COM": "2.0.0-beta.13",
+          "Vortice.DirectX": "2.4.2",
+          "Vortice.Mathematics": "1.4.26"
+        },
+        "runtime": {
+          "lib/net6.0/Vortice.MediaFoundation.dll": {
+            "assemblyVersion": "2.4.2.0",
+            "fileVersion": "2.4.2.0"
+          }
+        }
+      },
+      "Vortice.XAudio2/2.4.2": {
+        "dependencies": {
+          "SharpGen.Runtime": "2.0.0-beta.13",
+          "SharpGen.Runtime.COM": "2.0.0-beta.13",
+          "Vortice.DirectX": "2.4.2",
+          "Vortice.Mathematics": "1.4.26"
+        },
+        "runtime": {
+          "lib/net6.0/Vortice.XAudio2.dll": {
+            "assemblyVersion": "2.4.2.0",
+            "fileVersion": "2.4.2.0"
+          }
+        }
+      }
+    }
+  },
+  "libraries": {
+    "LiteTube/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "FFmpeg.AutoGen/5.1.2.1": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-TERT2DU0U6+6a2GS6JWWom9QzYtb+uiORaY6w+B+oW9zYw4wMfAxSreo1qBElsxNCc42wjP8xTj2d2D+TlN5vg==",
+      "path": "ffmpeg.autogen/5.1.2.1",
+      "hashPath": "ffmpeg.autogen.5.1.2.1.nupkg.sha512"
+    },
+    "FlyleafLib/3.7.55": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-U/ziohWYY/SBRKzacOk1STLR7nHUq+uG4fjPn/16Uc9Uhei8lypGz5G0oTO5K7SF4gptUMhkYIMkB8vjhMv19g==",
+      "path": "flyleaflib/3.7.55",
+      "hashPath": "flyleaflib.3.7.55.nupkg.sha512"
+    },
+    "Microsoft.Extensions.DependencyInjection/9.0.0-rc.1.24431.7": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-n/o5Ou4JIycIJZfTybYujLbfRaDsBNDY5fPxhFT7GDWTBqM59OJQuebiPNKj0nzrRvaes8Cnr763NSdCA2Cfzg==",
+      "path": "microsoft.extensions.dependencyinjection/9.0.0-rc.1.24431.7",
+      "hashPath": "microsoft.extensions.dependencyinjection.9.0.0-rc.1.24431.7.nupkg.sha512"
+    },
+    "Microsoft.Extensions.DependencyInjection.Abstractions/9.0.0-rc.1.24431.7": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-/Gtbv7/vlcUUx8rsVwI3zMS2gUMewMU2ukUa1mh00lRwBBmPPnempruehrhq/3LHLE4LO8tEaFtTYi1Z33PCWQ==",
+      "path": "microsoft.extensions.dependencyinjection.abstractions/9.0.0-rc.1.24431.7",
+      "hashPath": "microsoft.extensions.dependencyinjection.abstractions.9.0.0-rc.1.24431.7.nupkg.sha512"
+    },
+    "Microsoft.Extensions.Logging/9.0.0-rc.1.24431.7": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-y12goyBzy/ePVxUas/scjZNPvC2ZH9fYvTBt8+sVe3/SmPczhmo6+9D3F+DwzqFHT7H4LMw9nTv0HpyJvT3YPw==",
+      "path": "microsoft.extensions.logging/9.0.0-rc.1.24431.7",
+      "hashPath": "microsoft.extensions.logging.9.0.0-rc.1.24431.7.nupkg.sha512"
+    },
+    "Microsoft.Extensions.Logging.Abstractions/9.0.0-rc.1.24431.7": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-Dq4rgVJXE1SwINhR/D36O5fd9yZ4hQ4sWTt+gykLbWotaBEz16NhU95VKE4umsex147ZfkmDWr2Q0XldBQjuaA==",
+      "path": "microsoft.extensions.logging.abstractions/9.0.0-rc.1.24431.7",
+      "hashPath": "microsoft.extensions.logging.abstractions.9.0.0-rc.1.24431.7.nupkg.sha512"
+    },
+    "Microsoft.Extensions.Options/9.0.0-rc.1.24431.7": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-ZVLZmJAokgLf6JkCkDFNIegwtg+3ZcJpi1l55Od3h3RK0ofN9Cny5+WNA6sexDJP6OhPCCqsl6fK26j+ZN1kNQ==",
+      "path": "microsoft.extensions.options/9.0.0-rc.1.24431.7",
+      "hashPath": "microsoft.extensions.options.9.0.0-rc.1.24431.7.nupkg.sha512"
+    },
+    "Microsoft.Extensions.Primitives/9.0.0-rc.1.24431.7": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-o0oZEbXbuc3jY3KriFAoTNAeHzv3OCzCx5chpuB+ecoloBI+zpNup0ai8RuTe4Ky9ULK9TyAUC9hgIDX0NnjRw==",
+      "path": "microsoft.extensions.primitives/9.0.0-rc.1.24431.7",
+      "hashPath": "microsoft.extensions.primitives.9.0.0-rc.1.24431.7.nupkg.sha512"
+    },
+    "PolySharp/1.10.0": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-+uNyVhhKOskjJLKOwIQ2qGaA0T507FaMbz5RwLAtmRaMaTAcUAZAiZvSk4Z8z6GkmqOyO1zryYNXmO0Vh7IrYQ==",
+      "path": "polysharp/1.10.0",
+      "hashPath": "polysharp.1.10.0.nupkg.sha512"
+    },
+    "SharpGen.Runtime/2.0.0-beta.13": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-H+Up2Er3ptWzcQ+CAO652fEsBLAmoXqKqtvc/6ycRV9XfLN2XJch0h8CwKQ3muD6eADPFf8Xp+nDQ8wDpcRDlg==",
+      "path": "sharpgen.runtime/2.0.0-beta.13",
+      "hashPath": "sharpgen.runtime.2.0.0-beta.13.nupkg.sha512"
+    },
+    "SharpGen.Runtime.COM/2.0.0-beta.13": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-H22LsE3XTIOevf2TJgPgPnfYmjMlCtN+QYZVxzXlgTrgG2jHSTUTKZpIMPbKliLJGCEnDfX6yvBJvya0/xRTkA==",
+      "path": "sharpgen.runtime.com/2.0.0-beta.13",
+      "hashPath": "sharpgen.runtime.com.2.0.0-beta.13.nupkg.sha512"
+    },
+    "System.Diagnostics.DiagnosticSource/9.0.0-rc.1.24431.7": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-uispgX4BWG36vMQyEw7UDzwr+jCeoPFrNQehUKeX+JeL7C182057tR5BNm6CscXf5T5ww0rtUNs/6ob9DgNwLw==",
+      "path": "system.diagnostics.diagnosticsource/9.0.0-rc.1.24431.7",
+      "hashPath": "system.diagnostics.diagnosticsource.9.0.0-rc.1.24431.7.nupkg.sha512"
+    },
+    "Vortice.D3DCompiler/2.4.2": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-F/758/PioamTyLaVHY8qXK6lt1jKPDNa1VSRf/LGGhMYywVAAydK0xxhlGTrvfj3z+Amzk2fwliCNWTcvpD3Lw==",
+      "path": "vortice.d3dcompiler/2.4.2",
+      "hashPath": "vortice.d3dcompiler.2.4.2.nupkg.sha512"
+    },
+    "Vortice.Direct2D1/2.4.2": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-qvQMZWtXk9SeuYONWl1RirbxrLjJmIP5mVU9Tn66CA4BNYJsWyiFDmaIgRKtyFrwZ0NmBP2PpVtC4N9ONyNwOQ==",
+      "path": "vortice.direct2d1/2.4.2",
+      "hashPath": "vortice.direct2d1.2.4.2.nupkg.sha512"
+    },
+    "Vortice.Direct3D11/2.4.2": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-2bDAoXFH2AMHgW9buTcpG860Wpg5TfrDh7GH7BjInfKvVVZ6dh2y3msfzTv2wKvLEFnj5QPVMgc/UFWuidbEfQ==",
+      "path": "vortice.direct3d11/2.4.2",
+      "hashPath": "vortice.direct3d11.2.4.2.nupkg.sha512"
+    },
+    "Vortice.DirectComposition/2.4.2": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-Fqj+eZ1K4yxtpbuufJYcdLPVfYu/9fybBbyJxk7IEMJoKFhKoKzmaeqX7ficYOMB/JdmfFCevYXapQJhQOtX1A==",
+      "path": "vortice.directcomposition/2.4.2",
+      "hashPath": "vortice.directcomposition.2.4.2.nupkg.sha512"
+    },
+    "Vortice.DirectX/2.4.2": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-7QQvwhKbNyIP7ZLv6tx16fSThayDZUXwiEPb0ShsFQEzXgXokDVA0rdRoSqn3i+WNI+nu84uakn2lmqsCnaDyQ==",
+      "path": "vortice.directx/2.4.2",
+      "hashPath": "vortice.directx.2.4.2.nupkg.sha512"
+    },
+    "Vortice.DXGI/2.4.2": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-7RE288qH5HEwSUQhP0evhmzbOYLT/S37XRRyzwb0wTTIV/UhSrpJNM+8nzIP7TVPkFzTqRyr7VFLK0sxW6gxmA==",
+      "path": "vortice.dxgi/2.4.2",
+      "hashPath": "vortice.dxgi.2.4.2.nupkg.sha512"
+    },
+    "Vortice.Mathematics/1.4.26": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-K/6SujkKBvL/8vZGZl1zNTAeOv6MxBDRpgd+mQk3xnTYrXS0kpLM8+0Dy0uyziUYbgghD61bYJSXKJiUm+W3og==",
+      "path": "vortice.mathematics/1.4.26",
+      "hashPath": "vortice.mathematics.1.4.26.nupkg.sha512"
+    },
+    "Vortice.MediaFoundation/2.4.2": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-aPpZWZjptd8hiNNJxRA8kddMoklYMEobTnw+blnD3fAX79bHyQGVHQClnVZetxccEPiosuKeJIyusQj08+cWsA==",
+      "path": "vortice.mediafoundation/2.4.2",
+      "hashPath": "vortice.mediafoundation.2.4.2.nupkg.sha512"
+    },
+    "Vortice.XAudio2/2.4.2": {
+      "type": "package",
+      "serviceable": true,
+      "sha512": "sha512-yzYDJbTU14/ZnKRaj9F8REgIATkTKsNw76Gbe2NH9Q+XOqTG66E6aIbI9pM9bCUkCZ3bTnIO5vmBx0xhvpFasQ==",
+      "path": "vortice.xaudio2/2.4.2",
+      "hashPath": "vortice.xaudio2.2.4.2.nupkg.sha512"
+    }
+  }
+}
