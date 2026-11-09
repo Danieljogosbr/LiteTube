@@ -1,6 +1,6 @@
 <UserControl xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:asyncImageLoader="clr-namespace:AsyncImageLoader;assembly=AsyncImageLoader.WPF"
+             xmlns:asyncImageLoader="clr-namespace:AsyncImageLoader;assembly=LiteTube"
              Background="#0A0A0A"
              Foreground="#F5F5F5"
              Focusable="True">

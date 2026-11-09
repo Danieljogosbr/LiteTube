@@ -13,6 +13,9 @@ namespace LiteTube
     {
         private static Mutex _singleInstanceMutex;
 
+        [DllImport("shell32.dll", SetLastError = true)]
+        private static extern int SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string AppID);
+
         [DllImport("user32.dll")]
         private static extern bool SetForegroundWindow(IntPtr hWnd);
 
@@ -24,12 +27,14 @@ namespace LiteTube
         [STAThread]
         private static void Main()
         {
+            try { SetCurrentProcessExplicitAppUserModelID("LiteTube"); } catch { }
+
             AppDomain.CurrentDomain.AssemblyResolve += (s, resolveArgs) =>
             {
                 try
                 {
                     string asmName = new System.Reflection.AssemblyName(resolveArgs.Name).Name;
-                    if (asmName == "AsyncImageLoader.WPF" || asmName == "AsyncImageLoader")
+                    if (asmName == "AsyncImageLoader.WPF" || asmName == "AsyncImageLoader" || asmName == "LiteTube")
                     {
                         return typeof(Program).Assembly;
                     }

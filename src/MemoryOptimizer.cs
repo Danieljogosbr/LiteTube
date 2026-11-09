@@ -6,13 +6,32 @@ namespace LiteTube
 {
     public static class MemoryOptimizer
     {
-        [DllImport("ntdll.dll")]
-        private static extern int NtQueryInformationProcess(
-            IntPtr processHandle,
-            int processInformationClass,
-            IntPtr processInformation,
-            uint processInformationLength,
-            out uint returnLength);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr GetCurrentProcess();
+
+        [DllImport("kernel32.dll", EntryPoint = "K32GetProcessMemoryInfo", SetLastError = true)]
+        private static extern bool K32GetProcessMemoryInfo(IntPtr hProcess, IntPtr pCounters, uint cb);
+
+        [DllImport("psapi.dll", EntryPoint = "GetProcessMemoryInfo", SetLastError = true)]
+        private static extern bool GetProcessMemoryInfo(IntPtr hProcess, IntPtr pCounters, uint cb);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PROCESS_MEMORY_COUNTERS_EX2
+        {
+            public uint cb;
+            public uint PageFaultCount;
+            public UIntPtr PeakWorkingSetSize;
+            public UIntPtr WorkingSetSize;
+            public UIntPtr QuotaPeakPagedPoolUsage;
+            public UIntPtr QuotaPagedPoolUsage;
+            public UIntPtr QuotaPeakNonPagedPoolUsage;
+            public UIntPtr QuotaNonPagedPoolUsage;
+            public UIntPtr PagefileUsage;
+            public UIntPtr PeakPagefileUsage;
+            public UIntPtr PrivateUsage;
+            public UIntPtr PrivateWorkingSetSize;
+            public ulong SharedCommitUsage;
+        }
 
         /// <summary>
         /// When in video mode, we keep memory optimization off to give maximum smoothness and zero UI stutters.
@@ -38,31 +57,47 @@ namespace LiteTube
         /// <summary>
         /// Obtém o consumo exato de memória RAM física ativa (Private Working Set)
         /// idêntico ao valor exibido na coluna 'Memória' do Gerenciador de Tarefas do Windows (Task Manager).
+        /// Utiliza a API oficial Win32 K32GetProcessMemoryInfo com PROCESS_MEMORY_COUNTERS_EX2.
         /// </summary>
         public static double GetCurrentRamUsageMB()
         {
             try
             {
-                IntPtr hProcess = Process.GetCurrentProcess().Handle;
-                int structSize = IntPtr.Size == 8 ? 112 : 56;
-                IntPtr buffer = Marshal.AllocHGlobal(structSize);
+                IntPtr hProcess = GetCurrentProcess();
+                int sizeEx2 = Marshal.SizeOf(typeof(PROCESS_MEMORY_COUNTERS_EX2));
+                IntPtr buffer = Marshal.AllocHGlobal(sizeEx2);
                 try
                 {
-                    uint returnLength;
-                    // ProcessVmCounters = 3 (VM_COUNTERS_EX2)
-                    int status = NtQueryInformationProcess(hProcess, 3, buffer, (uint)structSize, out returnLength);
-                    if (status == 0)
+                    Marshal.WriteInt32(buffer, 0, sizeEx2);
+                    bool ok = false;
+                    try
                     {
-                        // Em x64 (112 bytes): offset 96 é PrivateWorkingSetSize (campo específico usado pelo Task Manager)
-                        // Em x86 (56 bytes): offset 48 é PrivateWorkingSetSize
-                        int offset = IntPtr.Size == 8 ? 96 : 48;
-                        long privateWorkingSetBytes = IntPtr.Size == 8
-                            ? Marshal.ReadInt64(buffer, offset)
-                            : Marshal.ReadInt32(buffer, offset);
+                        ok = K32GetProcessMemoryInfo(hProcess, buffer, (uint)sizeEx2);
+                    }
+                    catch { }
 
-                        if (privateWorkingSetBytes > 0)
+                    if (!ok)
+                    {
+                        try
                         {
-                            return Math.Round(privateWorkingSetBytes / (1024.0 * 1024.0), 1);
+                            ok = GetProcessMemoryInfo(hProcess, buffer, (uint)sizeEx2);
+                        }
+                        catch { }
+                    }
+
+                    if (ok)
+                    {
+                        var counters = (PROCESS_MEMORY_COUNTERS_EX2)Marshal.PtrToStructure(buffer, typeof(PROCESS_MEMORY_COUNTERS_EX2));
+                        ulong privateWs = (ulong)counters.PrivateWorkingSetSize;
+                        if (privateWs > 0)
+                        {
+                            return Math.Round(privateWs / (1024.0 * 1024.0), 1);
+                        }
+
+                        ulong workingSet = (ulong)counters.WorkingSetSize;
+                        if (workingSet > 0)
+                        {
+                            return Math.Round(workingSet / (1024.0 * 1024.0), 1);
                         }
                     }
                 }
@@ -73,7 +108,7 @@ namespace LiteTube
             }
             catch { }
 
-            // Fallback: WorkingSet64 caso a syscall não responda
+            // Fallback gerenciado clássico
             try
             {
                 using (Process proc = Process.GetCurrentProcess())
