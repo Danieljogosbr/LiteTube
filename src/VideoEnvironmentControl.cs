@@ -3099,12 +3099,9 @@ namespace LiteTube
                     Size = new Size(440, 24)
                 };
 
-                double thumbCacheMB = ThumbnailCache.GetDiskUsageMB();
-
                 var lblVidCache = new Label
                 {
-                    Text = string.Format("🖼️ Miniaturas em Disco: {0:0.0}/{1} MB  |  🚀 Streaming: Loopback Direto (RAM)",
-                        thumbCacheMB, _config.MaxThumbCacheSizeMB),
+                    Text = "🖼️ Cache de Miniaturas: 100% Memória RAM (Zero Disco)  |  🚀 Streaming: Loopback Direto (RAM)",
                     Font = new Font("Segoe UI Semibold", 8.8f, FontStyle.Bold),
                     ForeColor = AccentBlue,
                     Location = new Point(18, 376),
@@ -3171,8 +3168,8 @@ namespace LiteTube
                 btnClearVidCache.Click += (s, e) =>
                 {
                     ThumbnailCache.ClearDiskAndMemoryCache();
-                    lblVidCache.Text = string.Format("🖼️ Miniaturas em Disco: {0:0.0}/{1} MB  |  🚀 Streaming: Loopback Direto (RAM)",
-                        ThumbnailCache.GetDiskUsageMB(), _config.MaxThumbCacheSizeMB);
+                    AsyncImageLoader.Loaders.MemoryCachedWebImageLoader.ClearMemoryCache();
+                    lblVidCache.Text = "🖼️ Cache de Miniaturas: 100% Memória RAM (Limpo)  |  🚀 Streaming: Loopback Direto (RAM)";
                 };
 
                 refreshLabels();

@@ -1363,22 +1363,10 @@ namespace LiteTube
 
             int decodeW = _thumbnailDecodeWidth > 0 ? _thumbnailDecodeWidth : 320;
 
-            // 1. Tenta carregar do cache persistente em disco (Zero impacto de rede)
-            if (ThumbnailCache.HasDiskCache(id))
-            {
-                string diskPath = ThumbnailCache.GetDiskCachePath(id);
-                var img = LoadThumbnailImageFast(diskPath, decodeW);
-                if (img != null)
-                {
-                    ThumbnailSource = img;
-                    return;
-                }
-            }
-
             if (_thumbRequested) return;
             _thumbRequested = true;
 
-            // 2. Carrega via pipeline assíncrono moderno AsyncImageLoader com downsampling nativo
+            // Carregamento 100% em memória RAM via MemoryCachedWebImageLoader com downsampling nativo
             try
             {
                 var loader = AsyncImageLoader.ImageLoaderBase.DefaultLoader;
@@ -1392,35 +1380,10 @@ namespace LiteTube
                         {
                             ThumbnailSource = loadedImg;
                         }), DispatcherPriority.Background);
-                        return;
                     }
                 }
             }
             catch { }
-
-            // 3. Fallback adicional via ThumbnailCache
-            ThumbnailCache.GetOrRequestThumbnail(_model, () =>
-            {
-                if (_dispatcher != null && !_dispatcher.HasShutdownStarted)
-                {
-                    var op = _dispatcher.BeginInvoke(new Action(() =>
-                    {
-                        try
-                        {
-                            string path = ThumbnailCache.GetDiskCachePath(id);
-                            if (File.Exists(path))
-                            {
-                                var loadedImg = LoadThumbnailImageFast(path, decodeW);
-                                if (loadedImg != null)
-                                {
-                                    ThumbnailSource = loadedImg;
-                                }
-                            }
-                        }
-                        catch { }
-                    }), DispatcherPriority.Background);
-                }
-            });
         }
 
         public static ImageSource LoadThumbnailImageFast(string filePath, int decodePixelWidth = 320)

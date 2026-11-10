@@ -123,6 +123,18 @@ namespace LiteTube
             }
             catch { }
 
+            // Rotina de arranque: elimina pasta legada de miniaturas em disco (data/thumbs) migrada para 100% RAM
+            try
+            {
+                string legacyThumbsDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "thumbs");
+                if (Directory.Exists(legacyThumbsDir))
+                {
+                    Directory.Delete(legacyThumbsDir, true);
+                    Logger.Info("CLEANUP", "Pasta legada data/thumbs removida com sucesso. Miniaturas operando 100% em memória RAM.");
+                }
+            }
+            catch { }
+
             InitializeFlyleafEngine();
 
             Logger.Info("APP", "Iniciando loop da interface gráfica (MainForm)...");

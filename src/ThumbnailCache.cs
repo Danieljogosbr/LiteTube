@@ -12,16 +12,16 @@ using System.Windows.Forms;
 namespace LiteTube
 {
     /// <summary>
-    /// Gerenciador assíncrono de download e cache em duplo nível (RAM LRU + Disco)
-    /// de miniaturas do YouTube (vídeos, canais e playlists).
+    /// Gerenciador de miniaturas operando 100% em memória RAM (Memory Cache volátil / Zero Disco).
+    /// Mantém compatibilidade com a interface WinForms enquanto descarta qualquer gravação em SSD/HDD.
     /// </summary>
     public static class ThumbnailCache
     {
         public const int TARGET_THUMB_WIDTH = 360;
         public const int TARGET_THUMB_HEIGHT = 202;
 
-        private const int MAX_RAM_THUMBNAILS = 60;
-        private static int _maxDiskSizeMB = 15;
+        private const int MAX_RAM_THUMBNAILS = 120;
+        private static int _maxDiskSizeMB = 0; // Desativado: zero disco
 
         public static Func<string, bool> IsVisibleCheck;
 
@@ -38,54 +38,38 @@ namespace LiteTube
 
         public static string GetDiskCachePath(string idOrKey)
         {
-            string safeId = SanitizeId(idOrKey);
-            if (string.IsNullOrEmpty(safeId)) return null;
-            return Path.Combine(_thumbDir, safeId + ".jpg");
+            // 100% Memória RAM: não utiliza caminhos de arquivo em disco
+            return null;
         }
 
         public static bool HasDiskCache(string idOrKey)
         {
-            string path = GetDiskCachePath(idOrKey);
-            if (string.IsNullOrEmpty(path)) return false;
-            try
-            {
-                var fi = new FileInfo(path);
-                return fi.Exists && fi.Length > 200;
-            }
-            catch
-            {
-                return false;
-            }
+            // 100% Memória RAM: zero leitura de disco
+            return false;
         }
-        private static int _downloadsSinceLastDiskCleanup = 0;
 
         static ThumbnailCache()
         {
             _thumbDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "thumbs");
-            if (!Directory.Exists(_thumbDir))
-            {
-                try { Directory.CreateDirectory(_thumbDir); } catch { }
-            }
-
+            
+            // Rotina única no arranque para deletar a pasta legada data/thumbs e liberar espaço no disco
             try
             {
-                if (ServicePointManager.DefaultConnectionLimit < 32)
+                if (Directory.Exists(_thumbDir))
                 {
-                    ServicePointManager.DefaultConnectionLimit = 32;
+                    Directory.Delete(_thumbDir, true);
+                    Logger.Info("THUMB", "Pasta legada data/thumbs removida com sucesso. ThumbnailCache operando 100% em RAM.");
                 }
             }
-            catch { }
-
-            EnforceDiskLimitMB(_maxDiskSizeMB);
+            catch (Exception ex)
+            {
+                Logger.Warn("THUMB", "Aviso ao limpar pasta legada data/thumbs: " + ex.Message);
+            }
         }
 
         public static void SetMaxDiskLimitMB(int maxMB)
         {
-            if (maxMB >= 5 && maxMB <= 200)
-            {
-                _maxDiskSizeMB = maxMB;
-                EnforceDiskLimitMB(_maxDiskSizeMB);
-            }
+            // Desativado: operação 100% em memória RAM
         }
 
         public static Image GetOrRequestThumbnail(TrackItem item, Action onLoadedCallback)
@@ -137,96 +121,21 @@ namespace LiteTube
                     return null;
                 }
 
-                // Marca requisição em trânsito (sem limite que descarte cards da tela)
+                // Marca requisição em trânsito
                 _inFlight.Add(safeId);
             }
 
-            string diskPath = Path.Combine(_thumbDir, safeId + ".jpg");
-
-            // Processamento 100% assíncrono em segundo plano (nunca bloqueia thread de UI ou OnPaint)
+            // Processamento 100% assíncrono em RAM (nunca toca no disco nem bloqueia a UI thread)
             Task.Run(async () =>
             {
                 try
                 {
-                    // 1. Tenta carregar do cache local em disco (Fonte de verdade persistente: zero requisições de rede)
-                    if (File.Exists(diskPath))
-                    {
-                        try
-                        {
-                            var fi = new FileInfo(diskPath);
-                            if (fi.Length > 200)
-                            {
-                                Image diskImg = LoadResizedThumbnail(diskPath, TARGET_THUMB_WIDTH, TARGET_THUMB_HEIGHT);
-                                if (diskImg != null)
-                                {
-                                    try { File.SetLastWriteTimeUtc(diskPath, DateTime.UtcNow); } catch { }
-
-                                    List<Action> cbs = null;
-                                    lock (_lock)
-                                    {
-                                        StoreInMemoryLruUnsafe(safeId, diskImg);
-                                        List<Action> list;
-                                        if (_pendingCallbacks.TryGetValue(safeId, out list))
-                                        {
-                                            cbs = new List<Action>(list);
-                                            _pendingCallbacks.Remove(safeId);
-                                        }
-                                    }
-
-                                    DispatchCallbacks(cbs);
-                                    return; // Retorna imediatamente do disco, 0 requisições de rede
-                                }
-                            }
-                            else
-                            {
-                                try { File.Delete(diskPath); } catch { }
-                            }
-                        }
-                        catch { }
-                    }
-
-                    // Se o arquivo existe no disco, nunca bate na rede (evita risco de bloqueio de IP)
-                    if (File.Exists(diskPath))
-                    {
-                        try
-                        {
-                            var fi = new FileInfo(diskPath);
-                            if (fi.Length > 200)
-                            {
-                                Thread.Sleep(20);
-                                Image retryImg = LoadResizedThumbnail(diskPath, TARGET_THUMB_WIDTH, TARGET_THUMB_HEIGHT);
-                                if (retryImg != null)
-                                {
-                                    try { File.SetLastWriteTimeUtc(diskPath, DateTime.UtcNow); } catch { }
-                                    List<Action> cbs = null;
-                                    lock (_lock)
-                                    {
-                                        StoreInMemoryLruUnsafe(safeId, retryImg);
-                                        List<Action> list;
-                                        if (_pendingCallbacks.TryGetValue(safeId, out list))
-                                        {
-                                            cbs = new List<Action>(list);
-                                            _pendingCallbacks.Remove(safeId);
-                                        }
-                                    }
-                                    DispatchCallbacks(cbs);
-                                    return;
-                                }
-                            }
-                        }
-                        catch { }
-                    }
-
-                    // 2. Fila de conexões simultâneas (10 downloads simultâneos)
                     await _downloadSemaphore.WaitAsync().ConfigureAwait(false);
                     try
                     {
-                        // 3. Download isolado por item com retentativa pontual
-                        byte[] bytes = DownloadThumbnailBytes(safeId, customUrl);
-                        if (bytes != null && bytes.Length > 500)
+                        byte[] bytes = await DownloadThumbnailBytesAsync(safeId, customUrl).ConfigureAwait(false);
+                        if (bytes != null && bytes.Length > 200)
                         {
-                            SaveThumbnailToDiskSafe(diskPath, bytes);
-
                             Image img = LoadResizedThumbnailFromBytes(bytes, TARGET_THUMB_WIDTH, TARGET_THUMB_HEIGHT);
                             if (img != null)
                             {
@@ -234,7 +143,6 @@ namespace LiteTube
                                 lock (_lock)
                                 {
                                     StoreInMemoryLruUnsafe(safeId, img);
-                                    _downloadsSinceLastDiskCleanup++;
                                     List<Action> list;
                                     if (_pendingCallbacks.TryGetValue(safeId, out list))
                                     {
@@ -245,13 +153,6 @@ namespace LiteTube
 
                                 // Notifica a interface imediatamente
                                 DispatchCallbacks(cbs);
-
-                                // Limpeza periódica do limite de disco a cada 25 downloads
-                                if (_downloadsSinceLastDiskCleanup >= 25)
-                                {
-                                    _downloadsSinceLastDiskCleanup = 0;
-                                    ThreadPool.QueueUserWorkItem(delegate { EnforceDiskLimitMB(_maxDiskSizeMB); });
-                                }
                             }
                         }
                     }
@@ -262,7 +163,7 @@ namespace LiteTube
                 }
                 catch (Exception ex)
                 {
-                    Logger.Warn("THUMB", string.Format("Exceção ao processar miniatura {0}: {1}", safeId, ex.Message));
+                    Logger.Warn("THUMB", string.Format("Exceção ao processar miniatura {0} em RAM: {1}", safeId, ex.Message));
                 }
                 finally
                 {
@@ -277,7 +178,7 @@ namespace LiteTube
             return null;
         }
 
-        private static byte[] DownloadThumbnailBytes(string safeId, string customUrl)
+        private static async Task<byte[]> DownloadThumbnailBytesAsync(string safeId, string customUrl)
         {
             string url = customUrl;
             if (string.IsNullOrEmpty(url))
@@ -294,11 +195,11 @@ namespace LiteTube
             {
                 try
                 {
-                    using (var resp = HttpPipeline.Client.GetAsync(url).GetAwaiter().GetResult())
+                    using (var resp = await HttpPipeline.Client.GetAsync(url).ConfigureAwait(false))
                     {
                         if (resp.IsSuccessStatusCode)
                         {
-                            return resp.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult();
+                            return await resp.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
                         }
 
                         int statusCode = (int)resp.StatusCode;
@@ -307,20 +208,20 @@ namespace LiteTube
                             Logger.Warn("THUMB", string.Format("CDN retornou HTTP 429 para '{0}'. Tentativa {1}/{2}.", safeId, attempt, maxAttempts));
                             if (attempt < maxAttempts)
                             {
-                                Thread.Sleep(1200);
+                                await Task.Delay(1000).ConfigureAwait(false);
                                 continue;
                             }
                         }
                         else if (statusCode == 404)
                         {
-                            if (!url.Contains("mqdefault.jpg") && !url.Contains("hqdefault.jpg"))
-                            {
-                                url = "https://i.ytimg.com/vi/" + safeId + "/mqdefault.jpg";
-                                continue;
-                            }
-                            else if (url.Contains("mqdefault.jpg"))
+                            if (url.Contains("maxresdefault.jpg"))
                             {
                                 url = "https://i.ytimg.com/vi/" + safeId + "/hqdefault.jpg";
+                                continue;
+                            }
+                            if (url.Contains("hqdefault.jpg"))
+                            {
+                                url = "https://i.ytimg.com/vi/" + safeId + "/mqdefault.jpg";
                                 continue;
                             }
                             break;
@@ -331,7 +232,7 @@ namespace LiteTube
                 {
                     if (attempt < maxAttempts)
                     {
-                        Thread.Sleep(400);
+                        await Task.Delay(300).ConfigureAwait(false);
                         continue;
                     }
                     Logger.Warn("THUMB", string.Format("Erro no download da miniatura {0}: {1}", safeId, ex.Message));
@@ -340,34 +241,6 @@ namespace LiteTube
             }
 
             return null;
-        }
-
-        private static void SaveThumbnailToDiskSafe(string diskPath, byte[] bytes)
-        {
-            if (bytes == null || bytes.Length == 0) return;
-            try
-            {
-                string dir = Path.GetDirectoryName(diskPath);
-                if (!Directory.Exists(dir))
-                {
-                    Directory.CreateDirectory(dir);
-                }
-                string tempPath = diskPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
-                File.WriteAllBytes(tempPath, bytes);
-                if (File.Exists(diskPath))
-                {
-                    try { File.Delete(diskPath); } catch { }
-                }
-                File.Move(tempPath, diskPath);
-            }
-            catch
-            {
-            }
-        }
-
-        private static bool CheckVisibilitySafe(string safeId)
-        {
-            return true;
         }
 
         private static void DispatchCallbacks(List<Action> callbacks)
@@ -452,7 +325,6 @@ namespace LiteTube
 
             lock (_lock)
             {
-                // Não purga cards desnecessariamente se estivermos dentro da cota de RAM (evita thrashing no scroll)
                 if (_memoryCache.Count <= MAX_RAM_THUMBNAILS) return;
 
                 var node = _lruOrder.First;
@@ -507,24 +379,8 @@ namespace LiteTube
 
             while (_memoryCache.Count >= MAX_RAM_THUMBNAILS && _lruOrder.First != null)
             {
-                // Procura o item mais antigo que NÃO esteja atualmente visível na tela
-                LinkedListNode<string> targetNode = null;
-                var curr = _lruOrder.First;
-                while (curr != null)
-                {
-                    string candidate = curr.Value;
-                    if (!candidate.StartsWith("ch_", StringComparison.OrdinalIgnoreCase) && !CheckVisibilitySafe(candidate))
-                    {
-                        targetNode = curr;
-                        break;
-                    }
-                    curr = curr.Next;
-                }
-
-                if (targetNode == null) targetNode = _lruOrder.First;
-
-                string oldestKey = targetNode.Value;
-                _lruOrder.Remove(targetNode);
+                string oldestKey = _lruOrder.First.Value;
+                _lruOrder.RemoveFirst();
                 Image oldImg;
                 if (_memoryCache.TryGetValue(oldestKey, out oldImg))
                 {
@@ -538,19 +394,6 @@ namespace LiteTube
 
             _memoryCache[key] = img;
             _lruOrder.AddLast(key);
-        }
-
-        private static Image LoadResizedThumbnail(string path, int targetW, int targetH)
-        {
-            try
-            {
-                byte[] bytes = File.ReadAllBytes(path);
-                return LoadResizedThumbnailFromBytes(bytes, targetW, targetH);
-            }
-            catch
-            {
-                return null;
-            }
         }
 
         private static Image LoadResizedThumbnailFromBytes(byte[] bytes, int targetW, int targetH)
@@ -600,21 +443,8 @@ namespace LiteTube
 
         public static double GetDiskUsageMB()
         {
-            try
-            {
-                var dir = new DirectoryInfo(_thumbDir);
-                if (!dir.Exists) return 0.0;
-                long total = 0;
-                foreach (var f in dir.GetFiles("*.jpg"))
-                {
-                    total += f.Length;
-                }
-                return Math.Round(total / (1024.0 * 1024.0), 1);
-            }
-            catch
-            {
-                return 0.0;
-            }
+            // Operação 100% em memória RAM: 0.0 MB de disco
+            return 0.0;
         }
 
         public static void ClearDiskAndMemoryCache()
@@ -622,15 +452,9 @@ namespace LiteTube
             ClearMemoryCache();
             try
             {
-                var dir = new DirectoryInfo(_thumbDir);
-                if (!dir.Exists) return;
-                foreach (var f in dir.GetFiles("*.jpg"))
+                if (Directory.Exists(_thumbDir))
                 {
-                    try { f.Delete(); } catch { }
-                }
-                foreach (var f in dir.GetFiles("*.tmp"))
-                {
-                    try { f.Delete(); } catch { }
+                    Directory.Delete(_thumbDir, true);
                 }
             }
             catch { }
@@ -638,45 +462,12 @@ namespace LiteTube
 
         public static void EnforceDiskLimitMB(int maxMB)
         {
+            // Remove a pasta de disco se existir para manter zero gravação
             try
             {
-                var dir = new DirectoryInfo(_thumbDir);
-                if (!dir.Exists) return;
-
-                try
+                if (Directory.Exists(_thumbDir))
                 {
-                    foreach (var tmp in dir.GetFiles("*.tmp"))
-                    {
-                        if (DateTime.UtcNow - tmp.LastWriteTimeUtc > TimeSpan.FromMinutes(10))
-                        {
-                            try { tmp.Delete(); } catch { }
-                        }
-                    }
-                }
-                catch { }
-
-                FileInfo[] files = dir.GetFiles("*.jpg");
-                long maxBytes = (long)Math.Max(5, maxMB) * 1024L * 1024L;
-                long totalBytes = 0;
-                for (int i = 0; i < files.Length; i++)
-                {
-                    totalBytes += files[i].Length;
-                }
-
-                if (totalBytes <= maxBytes && files.Length <= 800) return;
-
-                Array.Sort(files, (a, b) => a.LastWriteTimeUtc.CompareTo(b.LastWriteTimeUtc));
-
-                long targetBytes = (long)(maxBytes * 0.75);
-                for (int i = 0; i < files.Length && (totalBytes > targetBytes || (files.Length - i) > 650); i++)
-                {
-                    long len = files[i].Length;
-                    try
-                    {
-                        files[i].Delete();
-                        totalBytes -= len;
-                    }
-                    catch { }
+                    Directory.Delete(_thumbDir, true);
                 }
             }
             catch { }

@@ -828,16 +828,16 @@ namespace LiteTube
             _btnRamBadge.Click += (s, e) =>
             {
                 _ytService.EnforceCacheSizeLimit(_config.MaxCacheSizeMB);
-                ThumbnailCache.EnforceDiskLimitMB(_config.MaxThumbCacheSizeMB);
+                ThumbnailCache.ClearMemoryCache();
+                AsyncImageLoader.Loaders.MemoryCachedWebImageLoader.ClearMemoryCache();
                 MemoryOptimizer.TrimMemory();
                 UpdateRamBadge();
 
                 int mCnt;
                 double mMB;
                 _ytService.GetCacheStats(out mCnt, out mMB);
-                double tMB = ThumbnailCache.GetDiskUsageMB();
-                _lblStatus.Text = string.Format("⚡ RAM otimizada! Caches: Música {0:0.0}/{1}MB | Miniaturas {2:0.0}/{3}MB",
-                    mMB, _config.MaxCacheSizeMB, tMB, _config.MaxThumbCacheSizeMB);
+                _lblStatus.Text = string.Format("⚡ RAM otimizada! Cache de Música: {0:0.0}/{1}MB | Miniaturas em RAM limpas",
+                    mMB, _config.MaxCacheSizeMB);
             };
 
             _btnGpuBadge.Click += (s, e) => ShowGpuHardwareDetailsDialog();
@@ -2355,7 +2355,7 @@ namespace LiteTube
                 bool ytResolverOk = YtDlpResolver.IsAvailable();
                 string ffmpegResolvedDir = FFmpegResolver.ResolveFFmpegDirectory();
                 bool ffmpegDirValid = Directory.Exists(ffmpegResolvedDir) && (Directory.GetFiles(ffmpegResolvedDir, "avcodec*.dll").Length > 0);
-                var downsampleMethod = typeof(AsyncImageLoader.Loaders.DiskCachedWebImageLoader).GetMethod("ProvideImageAsync", new Type[] { typeof(string), typeof(int) });
+                var downsampleMethod = typeof(AsyncImageLoader.Loaders.MemoryCachedWebImageLoader).GetMethod("ProvideImageAsync", new Type[] { typeof(string), typeof(int) });
                 bool downsampleSupported = (downsampleMethod != null);
 
                 Logger.Info("SELFTEST", string.Format("Otimizações de Boot, Apontamento FFmpeg e Downsampling WPF validados: YtDlpAvailable={0} | FFmpegValid={1} ('{2}') | NativeDownsample={3}.",

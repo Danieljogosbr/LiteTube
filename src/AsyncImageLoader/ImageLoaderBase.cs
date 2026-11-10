@@ -17,7 +17,7 @@ namespace AsyncImageLoader
                     {
                         if (_defaultLoader == null)
                         {
-                            _defaultLoader = new Loaders.RamCachedWebImageLoader();
+                            _defaultLoader = new Loaders.MemoryCachedWebImageLoader();
                         }
                     }
                 }
