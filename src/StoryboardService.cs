@@ -78,17 +78,17 @@ namespace LiteTube
             return Math.Max(0, Math.Min(FrameCount - 1, frameIdx));
         }
 
-        public void SetSheetBitmap(int sheetIndex, BitmapSource bitmap)
-        {
-            if (bitmap != null)
-            {
-                _sheets[sheetIndex] = bitmap;
-            }
-        }
-
         public void SetFallbackThumbnail(BitmapSource? bitmap)
         {
             _fallbackThumbnail = bitmap;
+        }
+
+        public void ClearBitmaps()
+        {
+            _sheets.Clear();
+            _croppedFrames.Clear();
+            _loadingSheets.Clear();
+            _fallbackThumbnail = null;
         }
 
         public BitmapSource? TryGetFrame(double targetSeconds, double totalDurationSeconds, Action? onSheetReadyCallback = null)
@@ -186,7 +186,10 @@ namespace LiteTube
 
     public static class StoryboardService
     {
-        private static readonly ConcurrentDictionary<string, StoryboardData> _cache = new(StringComparer.Ordinal);
+        private const int MaxCachedStoryboards = 2;
+        private static readonly object _cacheLock = new();
+        private static readonly Dictionary<string, StoryboardData> _cache = new(StringComparer.Ordinal);
+        private static readonly LinkedList<string> _lruOrder = new();
         private static readonly Regex _specRegex = new(
             "\"playerStoryboardSpecRenderer\"\\s*:\\s*\\{[^}]*?\"spec\"\\s*:\\s*\"([^\"]+)\"",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -196,11 +199,16 @@ namespace LiteTube
             if (string.IsNullOrWhiteSpace(videoId))
                 return null;
 
-            if (_cache.TryGetValue(videoId, out var existing))
+            lock (_cacheLock)
             {
-                if (durationSeconds > 0 && existing.VideoDurationSeconds <= 0)
-                    existing.VideoDurationSeconds = durationSeconds;
-                return existing;
+                if (_cache.TryGetValue(videoId, out var existing))
+                {
+                    if (durationSeconds > 0 && existing.VideoDurationSeconds <= 0)
+                        existing.VideoDurationSeconds = durationSeconds;
+                    _lruOrder.Remove(videoId);
+                    _lruOrder.AddFirst(videoId);
+                    return existing;
+                }
             }
 
             return await Task.Run(async () =>
@@ -264,12 +272,27 @@ namespace LiteTube
                         videoId, data.LevelIndex, data.FrameWidth, data.FrameHeight, data.FrameCount, data.Columns, data.Rows, data.IntervalMs));
                 }
 
-                // Limita o cache de storyboards em RAM aos últimos 6 vídeos
-                if (_cache.Count >= 6)
+                // Mantém em RAM no máximo os 2 vídeos mais recentes, liberando sprite sheets antigos
+                lock (_cacheLock)
                 {
-                    _cache.Clear();
+                    if (_cache.ContainsKey(videoId))
+                    {
+                        _lruOrder.Remove(videoId);
+                    }
+                    _cache[videoId] = data;
+                    _lruOrder.AddFirst(videoId);
+
+                    while (_lruOrder.Count > MaxCachedStoryboards && _lruOrder.Last != null)
+                    {
+                        string oldestId = _lruOrder.Last.Value;
+                        _lruOrder.RemoveLast();
+                        if (_cache.TryGetValue(oldestId, out var evicted))
+                        {
+                            _cache.Remove(oldestId);
+                            evicted.ClearBitmaps();
+                        }
+                    }
                 }
-                _cache[videoId] = data;
                 return data;
             }, cancellationToken).ConfigureAwait(false);
         }

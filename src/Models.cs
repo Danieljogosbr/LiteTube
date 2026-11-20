@@ -5,6 +5,12 @@ using System.Text.Json;
 
 namespace LiteTube
 {
+    public sealed class VideoChapter
+    {
+        public double StartSeconds { get; set; }
+        public string Title { get; set; } = "";
+    }
+
     public enum RepeatMode
     {
         None = 0,
@@ -27,17 +33,77 @@ namespace LiteTube
         public string ItemType { get; set; }
         public string ChannelId { get; set; }
         public string CustomThumbUrl { get; set; }
+        public string ChannelAvatarUrl { get; set; }
+        public string EffectiveChannelAvatarUrl
+        {
+            get
+            {
+                if (!string.IsNullOrEmpty(ChannelAvatarUrl)) return ChannelAvatarUrl;
+                if (IsChannel && !string.IsNullOrEmpty(CustomThumbUrl)) return CustomThumbUrl;
+                return "";
+            }
+        }
         public string ThumbnailUrl
         {
             get
             {
                 if (!string.IsNullOrEmpty(CustomThumbUrl)) return CustomThumbUrl;
-                if (!string.IsNullOrEmpty(Id)) return "https://i.ytimg.com/vi/" + Id + "/mqdefault.jpg";
+                if (!string.IsNullOrEmpty(Id) && !IsChannel) return "https://i.ytimg.com/vi/" + Id + "/mqdefault.jpg";
                 return "";
             }
         }
         public string SubscriberCountText { get; set; }
         public string VideoCountText { get; set; }
+
+        // Novos campos de metadados completos do vídeo (yt-dlp / InnerTube)
+        public string Description { get; set; }
+        public long ViewCount { get; set; }
+        public string UploadDateRaw { get; set; }
+        public string ViewCountText { get; set; }
+        public string PublishedTimeText { get; set; }
+
+        [System.Text.Json.Serialization.JsonIgnore]
+        public long LastPositionSeconds { get; set; }
+
+        [System.Text.Json.Serialization.JsonIgnore]
+        public List<int> AvailableResolutions { get; set; } = new List<int>();
+
+        [System.Text.Json.Serialization.JsonIgnore]
+        public double WatchProgressRatio
+        {
+            get
+            {
+                if (LastPositionSeconds > 0 && DurationSeconds > 0)
+                    return Math.Max(0.0, Math.Min(1.0, (double)LastPositionSeconds / DurationSeconds));
+                return 0.0;
+            }
+        }
+
+        public string Author
+        {
+            get { return Artist; }
+            set { Artist = value; }
+        }
+
+        public string FormattedViews
+        {
+            get
+            {
+                if (ViewCount > 0) return VideoItem.FormatViewCount(ViewCount);
+                if (!string.IsNullOrWhiteSpace(ViewCountText)) return ViewCountText;
+                return VideoItem.FormatViewCount(0);
+            }
+        }
+
+        public string FormattedUploadDate
+        {
+            get
+            {
+                if (!string.IsNullOrWhiteSpace(UploadDateRaw)) return VideoItem.FormatUploadDate(UploadDateRaw);
+                if (!string.IsNullOrWhiteSpace(PublishedTimeText)) return PublishedTimeText;
+                return string.Empty;
+            }
+        }
 
         public TrackItem()
         {
@@ -52,8 +118,14 @@ namespace LiteTube
             ItemType = "video";
             ChannelId = "";
             CustomThumbUrl = "";
+            ChannelAvatarUrl = "";
             SubscriberCountText = "";
             VideoCountText = "";
+            Description = "";
+            ViewCount = 0;
+            UploadDateRaw = "";
+            ViewCountText = "";
+            PublishedTimeText = "";
         }
 
         public bool IsChannel
@@ -110,6 +182,12 @@ namespace LiteTube
             ContinuationToken = "";
             Query = "";
         }
+    }
+
+    public class WatchNextDetails
+    {
+        public string SubscriberCountText { get; set; } = "";
+        public List<TrackItem> RelatedVideos { get; set; } = new List<TrackItem>();
     }
 
     public class ChannelPageData
@@ -173,8 +251,6 @@ namespace LiteTube
         public int VideoQualityHeight { get; set; }
         public bool AutoPauseMusicWhenVideoPlays { get; set; }
         public int MaxCacheSizeMB { get; set; }
-        public int MaxVideoCacheSizeMB { get; set; }
-        public int MaxThumbCacheSizeMB { get; set; }
         public int Repeat { get; set; }
         public bool Shuffle { get; set; }
         public bool MinimizeToTrayOnClose { get; set; }
@@ -188,6 +264,7 @@ namespace LiteTube
         public List<TrackItem> Favorites { get; set; }
         public List<TrackItem> SavedVideos { get; set; }
         public List<UserPlaylist> Playlists { get; set; }
+        public List<string> SearchHistory { get; set; }
 
         public AppConfig()
         {
@@ -202,8 +279,6 @@ namespace LiteTube
             VideoQualityHeight = 720;
             AutoPauseMusicWhenVideoPlays = true;
             MaxCacheSizeMB = 100;
-            MaxVideoCacheSizeMB = 200;
-            MaxThumbCacheSizeMB = 15;
             Repeat = (int)RepeatMode.None;
             Shuffle = false;
             MinimizeToTrayOnClose = true;
@@ -216,6 +291,7 @@ namespace LiteTube
             Favorites = new List<TrackItem>();
             SavedVideos = new List<TrackItem>();
             Playlists = new List<UserPlaylist>();
+            SearchHistory = new List<string>();
         }
 
         private static string GetConfigPath()
@@ -257,7 +333,9 @@ namespace LiteTube
                         if (cfg.Favorites == null) cfg.Favorites = new List<TrackItem>();
                         if (cfg.SavedVideos == null) cfg.SavedVideos = new List<TrackItem>();
                         if (cfg.Playlists == null) cfg.Playlists = new List<UserPlaylist>();
+                        if (cfg.SearchHistory == null) cfg.SearchHistory = new List<string>();
                         if (string.IsNullOrEmpty(cfg.BrowserForCookies)) cfg.BrowserForCookies = "firefox";
+                        cfg.CookiesFilePath = CookieVault.MigrateLegacyFileIfPresent(cfg.CookiesFilePath);
 
                         // Validate and migrate independent VideoVolume and MusicVolume
                         if (cfg.VideoVolume <= 0.001 || cfg.VideoVolume > 1.0)
@@ -285,8 +363,6 @@ namespace LiteTube
                         cfg.PlaybackSpeed = null;
 
                         if (cfg.MaxCacheSizeMB < 15 || cfg.MaxCacheSizeMB > 2000) cfg.MaxCacheSizeMB = 100;
-                        if (cfg.MaxVideoCacheSizeMB < 50 || cfg.MaxVideoCacheSizeMB > 2000) cfg.MaxVideoCacheSizeMB = 200;
-                        if (cfg.MaxThumbCacheSizeMB < 5 || cfg.MaxThumbCacheSizeMB > 100) cfg.MaxThumbCacheSizeMB = 15;
                         if (cfg.VideoQualityHeight != 360 && cfg.VideoQualityHeight != 480 &&
                             cfg.VideoQualityHeight != 720 && cfg.VideoQualityHeight != 1080)
                         {
@@ -383,6 +459,18 @@ namespace LiteTube
             SavedVideos.Insert(0, video);
             Save();
             return true;
+        }
+
+        public void AddSearchHistory(string? query)
+        {
+            string clean = (query ?? "").Trim();
+            if (clean.Length < 2) return;
+            SearchHistory ??= new List<string>();
+            SearchHistory.RemoveAll(x => string.Equals(x, clean, StringComparison.OrdinalIgnoreCase));
+            SearchHistory.Insert(0, clean);
+            if (SearchHistory.Count > 25)
+                SearchHistory.RemoveRange(25, SearchHistory.Count - 25);
+            Save();
         }
     }
 }

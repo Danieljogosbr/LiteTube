@@ -8,6 +8,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Markup;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
@@ -27,6 +28,10 @@ namespace LiteTube
         private TextBlock _footerText;
         private Border _emptyStatePanel;
         private TextBlock _emptyStateText;
+        private Grid _skeletonOverlay;
+        private WrapPanel _skeletonGridContainer;
+        private StackPanel _skeletonSidebarContainer;
+        private bool _isLoadingSkeleton = false;
 
         private DataTemplate _gridRowTemplate;
         private DataTemplate _sidebarItemTemplate;
@@ -39,6 +44,7 @@ namespace LiteTube
 
         private bool _isGridMode = false;
         private bool _isCompactSidebarMode = false;
+        private bool _isEmbeddedWatchGrid = false;
         private bool _isMusicEnvironment = false;
         private bool _hasMoreItems = false;
         private bool _isLoadingMore = false;
@@ -52,6 +58,8 @@ namespace LiteTube
 
         private SolidColorBrush _accentBrush;
         private Func<string, bool> _isFavoriteOrSavedCheck;
+        private TrackItem _hoveredPrefetchItem;
+        private long _lastWpfWheelHandledTick;
 
         public event Action<int, TrackItem> ItemActivated;
         public event Action<TrackItem> ChannelClicked;
@@ -59,10 +67,13 @@ namespace LiteTube
         public event Action<int, TrackItem> AddToQueueClicked;
         public event Action<int, TrackItem> WatchClipClicked;
         public event Action LoadMoreRequested;
+        public event Action<TrackItem> CardHoverEntered;
+        public event Action<TrackItem> CardHoverLeft;
+        public event Action<int> WheelDeltaUnhandled;
 
         public WpfMediaListControl()
         {
-            _accentBrush = new SolidColorBrush(Color.FromRgb(255, 30, 60));
+            _accentBrush = new SolidColorBrush(Color.FromRgb(0x3E, 0xA6, 0xFF));
             _accentBrush.Freeze();
 
             InitializeComponent();
@@ -89,7 +100,10 @@ namespace LiteTube
                         loaded = true;
                     }
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    Logger.Warn("WPF", "Falha ao carregar WpfMediaListControl.xaml: " + ex.Message);
+                }
             }
 
             // 2. Fallback: tenta carregar recurso compilado BAML via Application.LoadComponent
@@ -129,6 +143,9 @@ namespace LiteTube
             _footerText = (TextBlock)container.FindName("FooterText");
             _emptyStatePanel = (Border)container.FindName("EmptyStatePanel");
             _emptyStateText = (TextBlock)container.FindName("EmptyStateText");
+            _skeletonOverlay = container.FindName("SkeletonOverlay") as Grid;
+            _skeletonGridContainer = container.FindName("SkeletonGridContainer") as WrapPanel;
+            _skeletonSidebarContainer = container.FindName("SkeletonSidebarContainer") as StackPanel;
 
             if (_listBox != null)
             {
@@ -140,17 +157,12 @@ namespace LiteTube
                     }
                 };
                 _listBox.AddHandler(ScrollViewer.ScrollChangedEvent, new ScrollChangedEventHandler(OnListBoxScrollChanged));
+                _listBox.PreviewMouseWheel += OnListBoxPreviewMouseWheel;
+                _listBox.PreviewMouseMove += OnListBoxPreviewMouseMove;
+                _listBox.MouseLeave += OnListBoxMouseLeave;
                 _listBox.PreviewMouseLeftButtonDown += OnListBoxPreviewMouseLeftButtonDown;
                 _listBox.MouseLeftButtonUp += OnListBoxMouseLeftButtonUp;
             }
-
-            this.MouseEnter += (s, e) =>
-            {
-                if (_listBox != null && !_listBox.IsFocused)
-                {
-                    _listBox.Focus();
-                }
-            };
 
             if (_footerPanel != null)
             {
@@ -176,6 +188,11 @@ namespace LiteTube
         public bool IsSuspended
         {
             get { return _isSuspended; }
+        }
+
+        public bool IsVisualTreeReady
+        {
+            get { return _listBox != null && _gridRowTemplate != null && _sidebarItemTemplate != null && _musicRowTemplate != null; }
         }
 
         public double ScrollOffset
@@ -223,6 +240,40 @@ namespace LiteTube
             }
         }
 
+        public bool IsEmbeddedWatchGrid
+        {
+            get { return _isEmbeddedWatchGrid; }
+            set
+            {
+                if (_isEmbeddedWatchGrid != value)
+                {
+                    _isEmbeddedWatchGrid = value;
+                    if (_listBox != null)
+                    {
+                        ScrollViewer.SetVerticalScrollBarVisibility(
+                            _listBox,
+                            _isEmbeddedWatchGrid ? ScrollBarVisibility.Disabled : ScrollBarVisibility.Auto);
+                    }
+                    RebuildItemsSource();
+                }
+            }
+        }
+
+        public int ComputeEmbeddedGridHeight(double usableWidth)
+        {
+            if (!_isGridMode || _viewModels.Count == 0) return 220;
+            double effectiveW = Math.Max(320, usableWidth - 20);
+            int cols = CalculateColumnCount(effectiveW);
+            int gapX = 16;
+            int totalGaps = (cols - 1) * gapX;
+            int cardW = Math.Max(220, (int)((effectiveW - totalGaps) / cols));
+            if (cardW > 460) cardW = 460;
+            int thumbH = (int)Math.Round(cardW * 9.0 / 16.0);
+            int cardH = thumbH + 98;
+            int rowCount = (int)Math.Ceiling(_viewModels.Count / (double)cols);
+            return Math.Max(240, (rowCount * (cardH + 16)) + 24);
+        }
+
         public bool IsMusicEnvironment
         {
             get { return _isMusicEnvironment; }
@@ -254,6 +305,19 @@ namespace LiteTube
             {
                 _isLoadingMore = value;
                 UpdateFooterState();
+            }
+        }
+
+        public bool IsLoadingSkeleton
+        {
+            get { return _isLoadingSkeleton; }
+            set
+            {
+                if (_isLoadingSkeleton != value)
+                {
+                    _isLoadingSkeleton = value;
+                    UpdateSkeletonState();
+                }
             }
         }
 
@@ -636,21 +700,13 @@ namespace LiteTube
             int keepMin = Math.Max(0, cur - 25);
             int keepMax = Math.Min(_viewModels.Count - 1, cur + 35);
 
-            var keepIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             for (int i = 0; i < _viewModels.Count; i++)
             {
-                var vm = _viewModels[i];
-                if (i >= keepMin && i <= keepMax)
+                if (i < keepMin || i > keepMax)
                 {
-                    if (!string.IsNullOrEmpty(vm.Id))
-                        keepIds.Add(vm.Id);
-                }
-                else
-                {
-                    vm.UnloadThumbnail();
+                    _viewModels[i].UnloadThumbnail();
                 }
             }
-            ThumbnailCache.PruneOffscreenExcept(keepIds);
         }
 
         #endregion
@@ -713,6 +769,13 @@ namespace LiteTube
 
         private int CalculateColumnCount(double usableWidth)
         {
+            if (_isEmbeddedWatchGrid)
+            {
+                if (usableWidth >= 820) return 4;
+                if (usableWidth >= 560) return 3;
+                if (usableWidth >= 340) return 2;
+                return 1;
+            }
             if (usableWidth >= 1220) return 4;
             if (usableWidth >= 880) return 3;
             if (usableWidth >= 550) return 2;
@@ -724,18 +787,19 @@ namespace LiteTube
             _gridRows.Clear();
             if (_viewModels.Count == 0) return;
 
-            double usableW = Math.Max(240, ActualWidth > 0 ? ActualWidth - 28 : 800);
+            double usableW = Math.Max(240, ActualWidth > 0 ? ActualWidth - 20 : 800);
             int cols = CalculateColumnCount(usableW);
             _lastColumnCount = cols;
             _lastUsableWidth = usableW;
 
-            int gapX = 18;
+            int gapX = 16;
             int totalGaps = (cols - 1) * gapX;
-            int cardW = Math.Max(260, (int)((usableW - totalGaps) / cols));
+            int minCardW = _isEmbeddedWatchGrid ? 210 : 260;
+            int cardW = Math.Max(minCardW, (int)((usableW - totalGaps) / cols));
             if (cardW > 460) cardW = 460;
 
             int thumbH = (int)Math.Round(cardW * 9.0 / 16.0);
-            int cardH = thumbH + 88;
+            int cardH = thumbH + 98;
 
             int total = _viewModels.Count;
             for (int i = 0; i < total; i += cols)
@@ -801,9 +865,64 @@ namespace LiteTube
             }
         }
 
+        private void UpdateSkeletonState()
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.BeginInvoke(new Action(UpdateSkeletonState));
+                return;
+            }
+
+            if (_skeletonOverlay == null)
+            {
+                UpdateEmptyState();
+                return;
+            }
+
+            if (_isLoadingSkeleton)
+            {
+                if (_skeletonGridContainer != null)
+                {
+                    _skeletonGridContainer.Visibility = _isGridMode ? Visibility.Visible : Visibility.Collapsed;
+                }
+                if (_skeletonSidebarContainer != null)
+                {
+                    _skeletonSidebarContainer.Visibility = _isGridMode ? Visibility.Collapsed : Visibility.Visible;
+                }
+
+                if (_listBox != null) _listBox.Visibility = Visibility.Collapsed;
+                if (_emptyStatePanel != null) _emptyStatePanel.Visibility = Visibility.Collapsed;
+                _skeletonOverlay.Visibility = Visibility.Visible;
+
+                var pulse = new DoubleAnimation
+                {
+                    From = 0.4,
+                    To = 0.85,
+                    Duration = TimeSpan.FromMilliseconds(900),
+                    AutoReverse = true,
+                    RepeatBehavior = RepeatBehavior.Forever
+                };
+                _skeletonOverlay.BeginAnimation(UIElement.OpacityProperty, pulse);
+            }
+            else
+            {
+                _skeletonOverlay.BeginAnimation(UIElement.OpacityProperty, null);
+                _skeletonOverlay.Opacity = 1.0;
+                _skeletonOverlay.Visibility = Visibility.Collapsed;
+                if (_listBox != null) _listBox.Visibility = Visibility.Visible;
+                UpdateEmptyState();
+            }
+        }
+
         private void UpdateEmptyState()
         {
             if (_emptyStatePanel == null || _emptyStateText == null) return;
+
+            if (_isLoadingSkeleton)
+            {
+                _emptyStatePanel.Visibility = Visibility.Collapsed;
+                return;
+            }
 
             if (_items.Count == 0)
             {
@@ -845,6 +964,87 @@ namespace LiteTube
                     {
                         LoadMoreRequested();
                     }
+                }
+            }
+        }
+
+        private void OnListBoxPreviewMouseWheel(object sender, MouseWheelEventArgs e)
+        {
+            if (_listBox == null) return;
+            if (_isEmbeddedWatchGrid)
+            {
+                if (WheelDeltaUnhandled != null) WheelDeltaUnhandled(e.Delta);
+                _lastWpfWheelHandledTick = Environment.TickCount64;
+                e.Handled = true;
+                return;
+            }
+            var sv = _wpfScrollViewer ?? (_wpfScrollViewer = FindVisualChild<ScrollViewer>(_listBox));
+            if (sv == null || sv.ComputedVerticalScrollBarVisibility == Visibility.Collapsed || sv.ScrollableHeight <= 0.5)
+            {
+                if (WheelDeltaUnhandled != null) WheelDeltaUnhandled(e.Delta);
+                // Lista interna sem barra vertical ativa: propaga o evento para o container pai
+                var parent = this.Parent as UIElement;
+                if (parent != null)
+                {
+                    e.Handled = true;
+                    var forwarded = new MouseWheelEventArgs(e.MouseDevice, e.Timestamp, e.Delta)
+                    {
+                        RoutedEvent = UIElement.MouseWheelEvent,
+                        Source = sender
+                    };
+                    parent.RaiseEvent(forwarded);
+                }
+                return;
+            }
+
+            double nextOffset = Math.Max(0, Math.Min(sv.ScrollableHeight, sv.VerticalOffset - (e.Delta / 3.0)));
+            sv.ScrollToVerticalOffset(nextOffset);
+            _lastWpfWheelHandledTick = Environment.TickCount64;
+            e.Handled = true;
+        }
+
+        public bool ConsumeWpfWheelHandled()
+        {
+            long now = Environment.TickCount64;
+            if ((now - _lastWpfWheelHandledTick) <= 80)
+            {
+                _lastWpfWheelHandledTick = 0;
+                return true;
+            }
+            return false;
+        }
+
+        private void OnListBoxPreviewMouseMove(object sender, MouseEventArgs e)
+        {
+            var dep = e.OriginalSource as DependencyObject;
+            var vm = dep != null ? FindTrackViewModelFromSource(dep) : null;
+            TrackItem nextItem = (vm != null && vm.Model != null && !vm.IsChannel && !vm.Model.IsPlaylistCard) ? vm.Model : null;
+
+            string prevId = _hoveredPrefetchItem != null ? _hoveredPrefetchItem.Id : null;
+            string nextId = nextItem != null ? nextItem.Id : null;
+            if (string.Equals(prevId, nextId, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            if (_hoveredPrefetchItem != null && CardHoverLeft != null)
+            {
+                CardHoverLeft(_hoveredPrefetchItem);
+            }
+            _hoveredPrefetchItem = nextItem;
+            if (_hoveredPrefetchItem != null && CardHoverEntered != null)
+            {
+                CardHoverEntered(_hoveredPrefetchItem);
+            }
+        }
+
+        private void OnListBoxMouseLeave(object sender, MouseEventArgs e)
+        {
+            if (_hoveredPrefetchItem != null)
+            {
+                var leftItem = _hoveredPrefetchItem;
+                _hoveredPrefetchItem = null;
+                if (CardHoverLeft != null)
+                {
+                    CardHoverLeft(leftItem);
                 }
             }
         }
@@ -1037,20 +1237,22 @@ namespace LiteTube
 
     public class TrackItemViewModel : INotifyPropertyChanged
     {
-        private static readonly SolidColorBrush BrushBgDefault = new SolidColorBrush(Color.FromRgb(18, 18, 18));
-        private static readonly SolidColorBrush BrushBgPlaying = new SolidColorBrush(Color.FromRgb(40, 22, 32));
-        private static readonly SolidColorBrush BrushBgSelected = new SolidColorBrush(Color.FromRgb(28, 28, 28));
-        private static readonly SolidColorBrush BrushTextMain = new SolidColorBrush(Color.FromRgb(245, 245, 245));
-        private static readonly SolidColorBrush BrushTextDim = new SolidColorBrush(Color.FromRgb(160, 160, 160));
-        private static readonly SolidColorBrush BrushFavDim = new SolidColorBrush(Color.FromArgb(140, 255, 255, 255));
-        private static readonly SolidColorBrush BrushDurationDefault = new SolidColorBrush(Color.FromArgb(215, 10, 10, 10));
-        private static readonly SolidColorBrush BrushDurationPlaylist = new SolidColorBrush(Color.FromArgb(220, 120, 60, 200));
+        private static readonly SolidColorBrush BrushBgDefault = new SolidColorBrush(Color.FromRgb(0x0F, 0x0F, 0x0F));
+        private static readonly SolidColorBrush BrushBgPlaying = new SolidColorBrush(Color.FromRgb(0x1F, 0x1F, 0x1F));
+        private static readonly SolidColorBrush BrushBgSelected = new SolidColorBrush(Color.FromRgb(0x2A, 0x2A, 0x2A));
+        private static readonly SolidColorBrush BrushBorderDefault = new SolidColorBrush(Color.FromRgb(0x2A, 0x2A, 0x2A));
+        private static readonly SolidColorBrush BrushTextMain = new SolidColorBrush(Color.FromRgb(0xF1, 0xF1, 0xF1));
+        private static readonly SolidColorBrush BrushTextDim = new SolidColorBrush(Color.FromRgb(0xAA, 0xAA, 0xAA));
+        private static readonly SolidColorBrush BrushFavDim = new SolidColorBrush(Color.FromArgb(140, 241, 241, 241));
+        private static readonly SolidColorBrush BrushDurationDefault = new SolidColorBrush(Color.FromArgb(205, 15, 15, 15));
+        private static readonly SolidColorBrush BrushDurationPlaylist = new SolidColorBrush(Color.FromArgb(220, 62, 166, 255));
 
         static TrackItemViewModel()
         {
             BrushBgDefault.Freeze();
             BrushBgPlaying.Freeze();
             BrushBgSelected.Freeze();
+            BrushBorderDefault.Freeze();
             BrushTextMain.Freeze();
             BrushTextDim.Freeze();
             BrushFavDim.Freeze();
@@ -1065,6 +1267,8 @@ namespace LiteTube
 
         private ImageSource _thumbnailSource;
         private bool _thumbRequested = false;
+        private ImageSource _channelAvatarSource;
+        private bool _avatarRequested = false;
         private bool _isPlaying = false;
         private bool _isFavorite = false;
         private bool _isSelected = false;
@@ -1102,6 +1306,26 @@ namespace LiteTube
             get { return (_model != null && !string.IsNullOrEmpty(_model.Title)) ? _model.Title + " ✓" : ""; }
         }
 
+        public string ViewsAndDateText
+        {
+            get
+            {
+                if (_model == null || IsChannel || IsPlaylistCard) return "";
+                string views = !string.IsNullOrWhiteSpace(_model.ViewCountText)
+                    ? _model.ViewCountText
+                    : (_model.ViewCount > 0 ? VideoItem.FormatViewCount(_model.ViewCount) : "");
+                string date = _model.FormattedUploadDate;
+                if (!string.IsNullOrEmpty(views) && !string.IsNullOrEmpty(date)) return views + "  •  " + date;
+                if (!string.IsNullOrEmpty(views)) return views;
+                return date ?? "";
+            }
+        }
+
+        public Visibility ViewsAndDateVisibility
+        {
+            get { return !string.IsNullOrEmpty(ViewsAndDateText) ? Visibility.Visible : Visibility.Collapsed; }
+        }
+
         public string Subtitle
         {
             get
@@ -1135,6 +1359,16 @@ namespace LiteTube
         public Visibility FallbackVisibility
         {
             get { return _thumbnailSource == null ? Visibility.Visible : Visibility.Collapsed; }
+        }
+
+        public Visibility AvatarFallbackVisibility
+        {
+            get { return _channelAvatarSource == null ? Visibility.Visible : Visibility.Collapsed; }
+        }
+
+        public Visibility AvatarImageVisibility
+        {
+            get { return _channelAvatarSource != null ? Visibility.Visible : Visibility.Collapsed; }
         }
 
         public Visibility FavoriteButtonVisibility
@@ -1264,12 +1498,27 @@ namespace LiteTube
 
         public Thickness BorderThickness
         {
-            get { return _isPlaying ? new Thickness(1.5) : new Thickness(0); }
+            get { return _isPlaying ? new Thickness(1.5) : new Thickness(1); }
         }
 
         public Brush BorderBrush
         {
-            get { return _isPlaying ? _accentBrush : Brushes.Transparent; }
+            get { return _isPlaying ? _accentBrush : BrushBorderDefault; }
+        }
+
+        public double WatchProgressRatio
+        {
+            get
+            {
+                if (_model == null || IsChannel || IsPlaylistCard) return 0.0;
+                if (_model.WatchProgressRatio > 0.0) return Math.Max(0.0, Math.Min(1.0, _model.WatchProgressRatio));
+                return WatchHistoryService.Instance.GetProgressRatio(_model.Id);
+            }
+        }
+
+        public Visibility ProgressVisibility
+        {
+            get { return WatchProgressRatio > 0.01 ? Visibility.Visible : Visibility.Collapsed; }
         }
 
         public Brush TitleBrush
@@ -1318,6 +1567,28 @@ namespace LiteTube
             }
         }
 
+        public ImageSource ChannelAvatarSource
+        {
+            get
+            {
+                if (_channelAvatarSource == null && !_avatarRequested)
+                {
+                    EnsureChannelAvatarLoaded();
+                }
+                return _channelAvatarSource;
+            }
+            private set
+            {
+                if (_channelAvatarSource != value)
+                {
+                    _channelAvatarSource = value;
+                    OnPropertyChanged("ChannelAvatarSource");
+                    OnPropertyChanged("AvatarImageVisibility");
+                    OnPropertyChanged("AvatarFallbackVisibility");
+                }
+            }
+        }
+
         public TrackItemViewModel(TrackItem model, int index, SolidColorBrush accent, Dispatcher dispatcher)
         {
             _model = model;
@@ -1341,6 +1612,8 @@ namespace LiteTube
             OnPropertyChanged("TrackIndicator");
             OnPropertyChanged("IndicatorBrush");
             OnPropertyChanged("FavoriteBrush");
+            OnPropertyChanged("WatchProgressRatio");
+            OnPropertyChanged("ProgressVisibility");
         }
 
         public void UnloadThumbnail()
@@ -1352,10 +1625,20 @@ namespace LiteTube
                 OnPropertyChanged("ThumbnailSource");
                 OnPropertyChanged("FallbackVisibility");
             }
+            if (_channelAvatarSource != null)
+            {
+                _channelAvatarSource = null;
+                _avatarRequested = false;
+                OnPropertyChanged("ChannelAvatarSource");
+                OnPropertyChanged("AvatarImageVisibility");
+                OnPropertyChanged("AvatarFallbackVisibility");
+            }
         }
 
         public async void EnsureThumbnailLoaded()
         {
+            EnsureChannelAvatarLoaded();
+
             if (_thumbnailSource != null) return;
 
             string id = Id;
@@ -1386,41 +1669,45 @@ namespace LiteTube
             catch { }
         }
 
-        public static ImageSource LoadThumbnailImageFast(string filePath, int decodePixelWidth = 320)
+        public async void EnsureChannelAvatarLoaded()
         {
-            if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
-                return null;
+            if (_channelAvatarSource != null || _model == null || IsPlaylistCard) return;
+            if (_avatarRequested) return;
+            _avatarRequested = true;
 
             try
             {
-                byte[] buffer;
-                using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-                using (var ms = new MemoryStream((int)fs.Length))
+                var loader = AsyncImageLoader.ImageLoaderBase.DefaultLoader;
+                if (loader == null) return;
+
+                string avatarUrl = _model.EffectiveChannelAvatarUrl;
+                if (string.IsNullOrEmpty(avatarUrl))
                 {
-                    fs.CopyTo(ms);
-                    buffer = ms.ToArray();
+                    string chName = IsChannel ? _model.Title : _model.Artist;
+                    avatarUrl = await YouTubeService.ResolveChannelAvatarUrlStaticAsync(_model.ChannelId, chName).ConfigureAwait(false);
+                    if (!string.IsNullOrEmpty(avatarUrl))
+                    {
+                        _model.ChannelAvatarUrl = avatarUrl;
+                        if (IsChannel && string.IsNullOrEmpty(_model.CustomThumbUrl))
+                        {
+                            _model.CustomThumbUrl = avatarUrl;
+                        }
+                    }
                 }
 
-                var bitmap = new BitmapImage();
-                bitmap.BeginInit();
-                bitmap.CacheOption = BitmapCacheOption.OnLoad;
-                bitmap.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
-                bitmap.StreamSource = new MemoryStream(buffer);
-                if (decodePixelWidth > 0)
+                if (!string.IsNullOrEmpty(avatarUrl))
                 {
-                    bitmap.DecodePixelWidth = decodePixelWidth;
+                    var loadedAvatar = await loader.ProvideImageAsync(avatarUrl, 96).ConfigureAwait(false);
+                    if (loadedAvatar != null && _dispatcher != null && !_dispatcher.HasShutdownStarted)
+                    {
+                        var op = _dispatcher.BeginInvoke(new Action(() =>
+                        {
+                            ChannelAvatarSource = loadedAvatar;
+                        }), DispatcherPriority.Background);
+                    }
                 }
-                bitmap.EndInit();
-
-                if (bitmap.CanFreeze)
-                    bitmap.Freeze();
-
-                return bitmap;
             }
-            catch
-            {
-                return null;
-            }
+            catch { }
         }
 
         private static Brush GetChannelBrush(string name)

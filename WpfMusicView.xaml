@@ -1,0 +1,238 @@
+<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Background="#0F0F0F">
+    <Grid.Resources>
+        <Style x:Key="MusicNavBtn" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#D4D4D8"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
+            <Setter Property="FontSize" Value="13.5"/>
+            <Setter Property="Height" Value="40"/>
+            <Setter Property="Padding" Value="12,0"/>
+            <Setter Property="HorizontalContentAlignment" Value="Left"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Margin" Value="0,1"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="10" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#1F1F1F"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="MusicMiniNavBtn" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#D4D4D8"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
+            <Setter Property="FontSize" Value="10"/>
+            <Setter Property="Height" Value="58"/>
+            <Setter Property="Padding" Value="4,6"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Margin" Value="0,2"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="10" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#1F1F1F"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="MusicActionPill" TargetType="Button">
+            <Setter Property="Background" Value="#1F1F1F"/>
+            <Setter Property="Foreground" Value="#F1F1F1"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
+            <Setter Property="FontSize" Value="12.5"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Padding" Value="14,7"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="16" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#2D2D32"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Grid.Resources>
+
+    <Grid.RowDefinitions>
+        <RowDefinition Height="*"/>
+        <RowDefinition Height="76"/>
+    </Grid.RowDefinitions>
+
+    <Grid Grid.Row="0">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition x:Name="MusicSidebarColumn" Width="216"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <!-- EXPANDED MUSIC SIDEBAR (216px) -->
+        <Border x:Name="MusicSidebarPanel" Grid.Column="0" Background="#0F0F0F" Padding="10,8,10,12">
+            <DockPanel LastChildFill="True">
+                <StackPanel DockPanel.Dock="Top">
+                    <Button x:Name="NavMusicHome" Style="{StaticResource MusicNavBtn}">
+                        <StackPanel Orientation="Horizontal">
+                            <Path Data="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="18" Height="18" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,14,0"/>
+                            <TextBlock Text="Início" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="NavMusicExplore" Style="{StaticResource MusicNavBtn}">
+                        <StackPanel Orientation="Horizontal">
+                            <Path Data="M12 10.9c-.61 0-1.1.49-1.1 1.1s.49 1.1 1.1 1.1c.61 0 1.1-.49 1.1-1.1s-.49-1.1-1.1-1.1zM12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm2.19 12.19L6 18l3.81-8.19L18 6l-3.81 8.19z" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="18" Height="18" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,14,0"/>
+                            <TextBlock Text="Explorar" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="NavMusicAccountPlaylists" Style="{StaticResource MusicNavBtn}">
+                        <StackPanel Orientation="Horizontal">
+                            <Path Data="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-8 12.5v-9l6 4.5-6 4.5z" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="18" Height="18" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,14,0"/>
+                            <TextBlock Text="Playlists (Conta)" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="NavMusicFavorites" Style="{StaticResource MusicNavBtn}">
+                        <StackPanel Orientation="Horizontal">
+                            <Path Data="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="17" Height="17" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,15,0"/>
+                            <TextBlock Text="Favoritos" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="NavMusicQueue" Style="{StaticResource MusicNavBtn}">
+                        <StackPanel Orientation="Horizontal">
+                            <Path Data="M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="18" Height="18" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,14,0"/>
+                            <TextBlock Text="Fila Atual" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+
+                    <Border Height="1" Background="#222222" Margin="8,10"/>
+
+                    <TextBlock Text="PLAYLISTS LOCAIS" FontSize="11" FontWeight="Bold" Foreground="#777777" Margin="12,2,0,8"/>
+                    <Button x:Name="BtnNewPlaylist" Content="＋  Nova Playlist" Style="{StaticResource MusicActionPill}" Margin="4,0,4,6"/>
+                    <Button x:Name="BtnImportPlaylist" Content="↓  Importar URL" Style="{StaticResource MusicActionPill}" Margin="4,0,4,10"/>
+                </StackPanel>
+
+                <ListBox x:Name="LstLocalPlaylists" Background="Transparent" BorderThickness="0"
+                         Foreground="#D4D4D8" FontSize="13" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem">
+                            <Setter Property="Padding" Value="12,8"/>
+                            <Setter Property="Cursor" Value="Hand"/>
+                            <Setter Property="Foreground" Value="#D4D4D8"/>
+                            <Setter Property="Background" Value="Transparent"/>
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <ControlTemplate TargetType="ListBoxItem">
+                                        <Border x:Name="ItemBd" Background="{TemplateBinding Background}" CornerRadius="8" Padding="{TemplateBinding Padding}" Margin="2,1">
+                                            <ContentPresenter/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="ItemBd" Property="Background" Value="#1F1F1F"/>
+                                            </Trigger>
+                                            <Trigger Property="IsSelected" Value="True">
+                                                <Setter TargetName="ItemBd" Property="Background" Value="#26262A"/>
+                                                <Setter Property="Foreground" Value="#F1F1F1"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
+                        </Style>
+                    </ListBox.ItemContainerStyle>
+                </ListBox>
+            </DockPanel>
+        </Border>
+
+        <!-- MINI MUSIC SIDEBAR RAIL (72px) -->
+        <Border x:Name="MusicMiniSidebarPanel" Grid.Column="0" Background="#0F0F0F" Padding="4,8,4,12" Visibility="Collapsed">
+            <StackPanel>
+                <Button x:Name="MiniMusicHome" Style="{StaticResource MusicMiniNavBtn}">
+                    <StackPanel HorizontalAlignment="Center">
+                        <Path Data="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="20" Height="20" Stretch="Uniform" HorizontalAlignment="Center"/>
+                        <TextBlock Text="Início" FontSize="10" HorizontalAlignment="Center" Margin="0,4,0,0"/>
+                    </StackPanel>
+                </Button>
+                <Button x:Name="MiniMusicExplore" Style="{StaticResource MusicMiniNavBtn}">
+                    <StackPanel HorizontalAlignment="Center">
+                        <Path Data="M12 10.9c-.61 0-1.1.49-1.1 1.1s.49 1.1 1.1 1.1c.61 0 1.1-.49 1.1-1.1s-.49-1.1-1.1-1.1zM12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm2.19 12.19L6 18l3.81-8.19L18 6l-3.81 8.19z" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="20" Height="20" Stretch="Uniform" HorizontalAlignment="Center"/>
+                        <TextBlock Text="Explorar" FontSize="10" HorizontalAlignment="Center" Margin="0,4,0,0"/>
+                    </StackPanel>
+                </Button>
+                <Button x:Name="MiniMusicPlaylists" Style="{StaticResource MusicMiniNavBtn}">
+                    <StackPanel HorizontalAlignment="Center">
+                        <Path Data="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-8 12.5v-9l6 4.5-6 4.5z" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="20" Height="20" Stretch="Uniform" HorizontalAlignment="Center"/>
+                        <TextBlock Text="Playlists" FontSize="10" HorizontalAlignment="Center" Margin="0,4,0,0"/>
+                    </StackPanel>
+                </Button>
+                <Button x:Name="MiniMusicFavorites" Style="{StaticResource MusicMiniNavBtn}">
+                    <StackPanel HorizontalAlignment="Center">
+                        <Path Data="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="19" Height="19" Stretch="Uniform" HorizontalAlignment="Center"/>
+                        <TextBlock Text="Favoritos" FontSize="10" HorizontalAlignment="Center" Margin="0,4,0,0"/>
+                    </StackPanel>
+                </Button>
+                <Button x:Name="MiniMusicQueue" Style="{StaticResource MusicMiniNavBtn}">
+                    <StackPanel HorizontalAlignment="Center">
+                        <Path Data="M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="20" Height="20" Stretch="Uniform" HorizontalAlignment="Center"/>
+                        <TextBlock Text="Fila" FontSize="10" HorizontalAlignment="Center" Margin="0,4,0,0"/>
+                    </StackPanel>
+                </Button>
+            </StackPanel>
+        </Border>
+
+        <!-- MAIN MUSIC CONTENT -->
+        <Grid Grid.Column="1" Background="#0F0F0F">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+
+            <Grid Grid.Row="0" Margin="20,10,20,8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <Button x:Name="BtnBackToMusicPlaylists" Grid.Column="0" Content="← Voltar para Playlists"
+                        Style="{StaticResource MusicActionPill}" Margin="0,0,12,0" Visibility="Collapsed"/>
+
+                <TextBlock x:Name="LblMusicHeader" Grid.Column="1" Text="Recomendados do YouTube Music"
+                           FontSize="16" FontWeight="SemiBold" Foreground="#F1F1F1" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+
+                <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button x:Name="BtnShufflePlayAll" Content="Aleatório" Style="{StaticResource MusicActionPill}" Margin="0,0,8,0"/>
+                    <Button x:Name="BtnPlayAll" Content="▶  Tocar Tudo" Style="{StaticResource MusicActionPill}"
+                            Background="#FF0033" Foreground="#FFFFFF"/>
+                </StackPanel>
+            </Grid>
+
+            <ContentControl x:Name="MusicListHost" Grid.Row="1" Margin="8,0,8,0"/>
+        </Grid>
+    </Grid>
+
+    <!-- BOTTOM MUSIC PLAYER BAR (WPF Native Direct) -->
+    <ContentControl x:Name="MusicBarHost" Grid.Row="1"/>
+</Grid>

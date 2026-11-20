@@ -19,6 +19,237 @@ namespace LiteTube
         private readonly string _cacheDir;
         private readonly object _cacheLock = new object();
 
+        // Cache em RAM limitado para URLs de avatares de canais (por ChannelId UC... e por Nome do Canal)
+        private const int MaxAvatarCacheEntries = 500;
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _channelAvatarMemoryCache
+            = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private static readonly System.Collections.Concurrent.ConcurrentQueue<string> _channelAvatarCacheOrder
+            = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Task<string>> _inFlightAvatarResolves
+            = new System.Collections.Concurrent.ConcurrentDictionary<string, Task<string>>(StringComparer.OrdinalIgnoreCase);
+        private static readonly SemaphoreSlim _avatarResolveSemaphore = new SemaphoreSlim(4, 4);
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string Url, DateTime ExpiresAtUtc)> _audioUrlMemoryCache
+            = new System.Collections.Concurrent.ConcurrentDictionary<string, (string Url, DateTime ExpiresAtUtc)>(StringComparer.OrdinalIgnoreCase);
+        private static readonly object _browserCookieCacheLock = new object();
+        private static string _cachedBrowserCookieHeader;
+        private static string _cachedBrowserCookieBrowser;
+        private static DateTime _cachedBrowserCookieExpiryUtc = DateTime.MinValue;
+
+        public static string GetCachedChannelAvatarUrl(string channelId, string channelName)
+        {
+            string url;
+            if (!string.IsNullOrWhiteSpace(channelId) && _channelAvatarMemoryCache.TryGetValue(channelId.Trim(), out url) && !string.IsNullOrEmpty(url))
+                return url;
+            if (!string.IsNullOrWhiteSpace(channelName) && _channelAvatarMemoryCache.TryGetValue("name:" + channelName.Trim(), out url) && !string.IsNullOrEmpty(url))
+                return url;
+            return "";
+        }
+
+        public static void CacheChannelAvatarUrl(string channelId, string channelName, string avatarUrl)
+        {
+            if (string.IsNullOrWhiteSpace(avatarUrl)) return;
+            avatarUrl = NormalizeAvatarUrl(avatarUrl);
+            if (string.IsNullOrEmpty(avatarUrl)) return;
+
+            if (!string.IsNullOrWhiteSpace(channelId))
+            {
+                StoreAvatarCacheEntry(channelId.Trim(), avatarUrl);
+            }
+            if (!string.IsNullOrWhiteSpace(channelName) && !string.Equals(channelName.Trim(), "YouTube", StringComparison.OrdinalIgnoreCase))
+            {
+                StoreAvatarCacheEntry("name:" + channelName.Trim(), avatarUrl);
+            }
+        }
+
+        private static void StoreAvatarCacheEntry(string key, string avatarUrl)
+        {
+            bool isNew = !_channelAvatarMemoryCache.ContainsKey(key);
+            _channelAvatarMemoryCache[key] = avatarUrl;
+            if (isNew)
+            {
+                _channelAvatarCacheOrder.Enqueue(key);
+                while (_channelAvatarMemoryCache.Count > MaxAvatarCacheEntries && _channelAvatarCacheOrder.TryDequeue(out string oldKey))
+                {
+                    _channelAvatarMemoryCache.TryRemove(oldKey, out _);
+                }
+            }
+        }
+
+        public static string NormalizeAvatarUrl(string rawUrl)
+        {
+            if (string.IsNullOrWhiteSpace(rawUrl)) return "";
+            string url = UnescapeJsonString(rawUrl).Replace("\\/", "/").Replace("\\u0026", "&").Trim();
+            if (url.StartsWith("//")) url = "https:" + url;
+            // Descarta banners horizontais de canal (fcrop64 / =w1060 / =w2120) que compartilham o domínio yt3.googleusercontent.com
+            if (url.IndexOf("fcrop64", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                url.IndexOf("=w1060", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                url.IndexOf("=w1707", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                url.IndexOf("=w2120", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                url.IndexOf("=w2560", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "";
+            }
+            // Melhora nitidez de miniaturas minúsculas (=s48- ou =s68- -> =s176-)
+            url = Regex.Replace(url, @"=s(?:32|48|68|88)-c", "=s176-c");
+            return url;
+        }
+
+        public static string ExtractChannelAvatarUrl(string block)
+        {
+            if (string.IsNullOrEmpty(block)) return "";
+
+            // 1. Prioriza blocos explícitos de avatar de canal
+            string[] priorityMarkers = new string[]
+            {
+                "\"channelMetadataRenderer\"",
+                "\"c4TabbedHeaderRenderer\"",
+                "\"decoratedAvatarViewModel\"",
+                "\"channelThumbnailSupportedRenderers\"",
+                "\"channelThumbnailWithLinkRenderer\"",
+                "\"avatar\""
+            };
+
+            for (int m = 0; m < priorityMarkers.Length; m++)
+            {
+                int idx = block.IndexOf(priorityMarkers[m], StringComparison.Ordinal);
+                if (idx >= 0)
+                {
+                    string sub = block.Substring(idx, Math.Min(4500, block.Length - idx));
+                    string found = MatchFirstValidAvatarUrl(sub);
+                    if (!string.IsNullOrEmpty(found)) return found;
+                }
+            }
+
+            // 2. Fallback para qualquer URL de avatar válida no bloco
+            return MatchFirstValidAvatarUrl(block);
+        }
+
+        private static string MatchFirstValidAvatarUrl(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return "";
+            var matches = Regex.Matches(
+                text,
+                "\"url\"\\s*:\\s*\"((?:https?:)?(?:\\\\?/){2}[a-zA-Z0-9_.-]+?\\.(?:ggpht|googleusercontent)\\.com(?:\\\\?/[^\"\\\\]|[^\"])+)\""
+            );
+
+            for (int i = 0; i < matches.Count; i++)
+            {
+                string candidate = NormalizeAvatarUrl(matches[i].Groups[1].Value);
+                if (!string.IsNullOrEmpty(candidate))
+                {
+                    return candidate;
+                }
+            }
+            return "";
+        }
+
+        public static async Task<string> ResolveChannelAvatarUrlStaticAsync(string channelId, string channelName)
+        {
+            string cached = GetCachedChannelAvatarUrl(channelId, channelName);
+            if (!string.IsNullOrEmpty(cached)) return cached;
+
+            string cleanId = (channelId ?? "").Trim();
+            string cleanName = (channelName ?? "").Trim();
+            if (cleanId.StartsWith("CH_", StringComparison.OrdinalIgnoreCase))
+                cleanId = cleanId.Substring(3);
+
+            string flightKey = !string.IsNullOrEmpty(cleanId) && cleanId.StartsWith("UC")
+                ? cleanId
+                : (!string.IsNullOrEmpty(cleanName) && !string.Equals(cleanName, "YouTube", StringComparison.OrdinalIgnoreCase) ? ("name:" + cleanName) : "");
+
+            if (string.IsNullOrEmpty(flightKey)) return "";
+
+            return await _inFlightAvatarResolves.GetOrAdd(flightKey, async _ =>
+            {
+                try
+                {
+                    await _avatarResolveSemaphore.WaitAsync().ConfigureAwait(false);
+                    try
+                    {
+                        string recheck = GetCachedChannelAvatarUrl(cleanId, cleanName);
+                        if (!string.IsNullOrEmpty(recheck)) return recheck;
+
+                        var headers = new Dictionary<string, string>
+                        {
+                            { "X-YouTube-Client-Name", "1" },
+                            { "X-YouTube-Client-Version", "2.20240530.01.00" },
+                            { "Origin", "https://www.youtube.com" }
+                        };
+
+                        // Tentativa 1: Se tivermos o browseId oficial do canal (UC...), consulta o endpoint browse
+                        if (!string.IsNullOrEmpty(cleanId) && cleanId.StartsWith("UC"))
+                        {
+                            string browsePayload = "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"2.20240530.01.00\",\"hl\":\"pt\",\"gl\":\"BR\"}},\"browseId\":\"" +
+                                                   EscapeJson(cleanId) + "\"}";
+                            string browseJson = await HttpPipeline.PostJsonAsync(
+                                "https://www.youtube.com/youtubei/v1/browse?prettyPrint=false",
+                                browsePayload,
+                                "https://www.youtube.com/channel/" + cleanId,
+                                headers).ConfigureAwait(false);
+
+                            string av = ExtractChannelAvatarUrl(browseJson);
+                            if (!string.IsNullOrEmpty(av))
+                            {
+                                CacheChannelAvatarUrl(cleanId, cleanName, av);
+                                return av;
+                            }
+                        }
+
+                        // Tentativa 2: Busca rápida pelo nome do canal ou ID no InnerTube Search
+                        string query = !string.IsNullOrEmpty(cleanName) && !string.Equals(cleanName, "YouTube", StringComparison.OrdinalIgnoreCase)
+                            ? cleanName
+                            : cleanId;
+
+                        if (!string.IsNullOrEmpty(query))
+                        {
+                            string searchPayload = "{\"context\":{\"client\":{\"clientName\":\"WEB\",\"clientVersion\":\"2.20240530.01.00\",\"hl\":\"pt\",\"gl\":\"BR\"}},\"query\":\"" +
+                                                   EscapeJson(query) + "\",\"params\":\"EgIQAg==\"}";
+                            string searchJson = await HttpPipeline.PostJsonAsync(
+                                "https://www.youtube.com/youtubei/v1/search?prettyPrint=false",
+                                searchPayload,
+                                "https://www.youtube.com/",
+                                headers).ConfigureAwait(false);
+
+                            if (!string.IsNullOrEmpty(searchJson))
+                            {
+                                string[] chBlocks = searchJson.Split(new string[] { "\"channelRenderer\":" }, StringSplitOptions.None);
+                                if (chBlocks.Length > 1)
+                                {
+                                    string b = chBlocks[1];
+                                    if (b.Length > 5000) b = b.Substring(0, 5000);
+                                    string foundCid = ExtractRegex(b, "\"channelId\"\\s*:\\s*\"(UC[a-zA-Z0-9_-]+)\"");
+                                    string av = ExtractChannelAvatarUrl(b);
+                                    if (!string.IsNullOrEmpty(av))
+                                    {
+                                        CacheChannelAvatarUrl(!string.IsNullOrEmpty(foundCid) ? foundCid : cleanId, cleanName, av);
+                                        return av;
+                                    }
+                                }
+
+                                string fallbackAv = ExtractChannelAvatarUrl(searchJson);
+                                if (!string.IsNullOrEmpty(fallbackAv))
+                                {
+                                    CacheChannelAvatarUrl(cleanId, cleanName, fallbackAv);
+                                    return fallbackAv;
+                                }
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        _avatarResolveSemaphore.Release();
+                    }
+                }
+                catch { }
+                finally
+                {
+                    Task<string> removed;
+                    _inFlightAvatarResolves.TryRemove(flightKey, out removed);
+                }
+                return "";
+            }).ConfigureAwait(false);
+        }
+
         static YouTubeService()
         {
             try
@@ -416,6 +647,30 @@ namespace LiteTube
 
                         data.Items = playlists;
                     }
+
+                    // Garante que o AvatarUrl do canal esteja preenchido (via cache em RAM ou resolução dedicada)
+                    if (string.IsNullOrEmpty(data.AvatarUrl))
+                    {
+                        data.AvatarUrl = GetCachedChannelAvatarUrl(data.ChannelId, data.ChannelName);
+                    }
+                    if (string.IsNullOrEmpty(data.AvatarUrl) && !string.IsNullOrEmpty(data.ChannelId) && data.ChannelId.StartsWith("UC"))
+                    {
+                        data.AvatarUrl = ResolveChannelAvatarUrlStaticAsync(data.ChannelId, data.ChannelName).GetAwaiter().GetResult();
+                    }
+                    if (!string.IsNullOrEmpty(data.AvatarUrl))
+                    {
+                        CacheChannelAvatarUrl(data.ChannelId, data.ChannelName, data.AvatarUrl);
+                        if (data.Items != null)
+                        {
+                            for (int i = 0; i < data.Items.Count; i++)
+                            {
+                                if (data.Items[i] != null && string.IsNullOrEmpty(data.Items[i].ChannelAvatarUrl))
+                                {
+                                    data.Items[i].ChannelAvatarUrl = data.AvatarUrl;
+                                }
+                            }
+                        }
+                    }
                 }
                 catch { }
 
@@ -424,16 +679,17 @@ namespace LiteTube
         }
 
         /// <summary>
-        /// Fetches related/recommended videos for the currently playing video using YouTube's InnerTube Watch Next API.
-        /// Extremely fast (~150ms) and accurately reproduces YouTube's watch sidebar suggestions.
+        /// <summary>
+        /// Fetches related/recommended videos + engagement details (subscribers, likes, comments count & continuation)
+        /// from YouTube InnerTube Watch Next API in a single fast request (~150ms).
         /// </summary>
-        public async Task<List<TrackItem>> FetchRelatedVideosAsync(string videoId, AppConfig config, int maxItems = 35)
+        public async Task<WatchNextDetails> FetchWatchNextDetailsAsync(string videoId, AppConfig config, int maxItems = 35)
         {
-            var list = new List<TrackItem>();
-            if (string.IsNullOrWhiteSpace(videoId)) return list;
+            var details = new WatchNextDetails();
+            if (string.IsNullOrWhiteSpace(videoId)) return details;
 
             string safeId = Regex.Replace(videoId, "[^a-zA-Z0-9_-]", "");
-            if (string.IsNullOrEmpty(safeId)) return list;
+            if (string.IsNullOrEmpty(safeId)) return details;
 
             return await Task.Run(() =>
             {
@@ -446,16 +702,22 @@ namespace LiteTube
                                      EscapeJson(safeId) + "\"}";
                     string json = PostInnerTube("https://www.youtube.com/youtubei/v1/next?prettyPrint=false", payload, config, "https://www.youtube.com/watch?v=" + safeId);
 
-                    var parsed = ParseInnerTubeSearchPage(json, true, false);
-                    foreach (var item in parsed.Items)
+                    if (!string.IsNullOrEmpty(json))
                     {
-                        if (string.IsNullOrEmpty(item.Id) || item.Id == safeId) continue;
-                        if (item.IsChannel || item.IsPlaylistCard) continue;
-                        if (IsShortsVideo(item.Title, item.DurationSeconds, "")) continue;
-                        if (seenIds.Add(item.Id))
+                        string sub = ExtractFieldText(json, "\"subscriberCountText\"", 350);
+                        if (!string.IsNullOrEmpty(sub)) details.SubscriberCountText = UnescapeJsonString(sub);
+
+                        var parsed = ParseInnerTubeSearchPage(json, true, false);
+                        foreach (var item in parsed.Items)
                         {
-                            list.Add(item);
-                            if (list.Count >= maxItems) break;
+                            if (string.IsNullOrEmpty(item.Id) || item.Id == safeId) continue;
+                            if (item.IsChannel || item.IsPlaylistCard) continue;
+                            if (IsShortsVideo(item.Title, item.DurationSeconds, "")) continue;
+                            if (seenIds.Add(item.Id))
+                            {
+                                details.RelatedVideos.Add(item);
+                                if (details.RelatedVideos.Count >= maxItems) break;
+                            }
                         }
                     }
                 }
@@ -464,8 +726,7 @@ namespace LiteTube
                     Logger.Warn("YTSERVICE", "InnerTube next error para " + safeId + ": " + ex.Message);
                 }
 
-                // Fallback: If InnerTube returned fewer than 5 items, search YouTube for related videos using the video id / title
-                if (list.Count < 5)
+                if (details.RelatedVideos.Count < 5)
                 {
                     try
                     {
@@ -479,8 +740,8 @@ namespace LiteTube
                                 if (IsShortsVideo(item.Title, item.DurationSeconds, "")) continue;
                                 if (seenIds.Add(item.Id))
                                 {
-                                    list.Add(item);
-                                    if (list.Count >= maxItems) break;
+                                    details.RelatedVideos.Add(item);
+                                    if (details.RelatedVideos.Count >= maxItems) break;
                                 }
                             }
                         }
@@ -488,8 +749,14 @@ namespace LiteTube
                     catch { }
                 }
 
-                return list;
+                return details;
             });
+        }
+
+        public async Task<List<TrackItem>> FetchRelatedVideosAsync(string videoId, AppConfig config, int maxItems = 35)
+        {
+            var details = await FetchWatchNextDetailsAsync(videoId, config, maxItems);
+            return details.RelatedVideos;
         }
 
         /// <summary>
@@ -563,11 +830,11 @@ namespace LiteTube
                         string sub = ExtractFieldText(b, "\"videoCountText\"", 350);
                         if (string.IsNullOrEmpty(sub)) sub = ExtractFieldText(b, "\"subscriberCountText\"", 350);
                         if (!string.IsNullOrEmpty(sub)) data.SubscriberText = UnescapeJsonString(sub);
-                        string av = ExtractRegex(b, "\"url\"\\s*:\\s*\"((?:https?:)?//yt3\\.[^\"]+)\"");
+                        string av = ExtractChannelAvatarUrl(b);
                         if (!string.IsNullOrEmpty(av))
                         {
-                            if (av.StartsWith("//")) av = "https:" + av;
                             data.AvatarUrl = av;
+                            CacheChannelAvatarUrl(cid, data.ChannelName, av);
                         }
                         return;
                     }
@@ -587,14 +854,28 @@ namespace LiteTube
             if (string.IsNullOrEmpty(json)) return;
             try
             {
-                string headerBlock = json.Length > 30000 ? json.Substring(0, 30000) : json;
-                string title = ExtractRegex(headerBlock, "\"channelMetadataRenderer\"\\s*:\\s*\\{\\s*\"title\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
-                if (!string.IsNullOrEmpty(title))
+                // Procura channelMetadataRenderer em todo o JSON (frequentemente posicionado após contents no browse do YouTube)
+                int metaIdx = json.IndexOf("\"channelMetadataRenderer\"", StringComparison.Ordinal);
+                if (metaIdx >= 0)
                 {
-                    data.ChannelName = UnescapeJsonString(title);
+                    string metaBlock = json.Substring(metaIdx, Math.Min(4000, json.Length - metaIdx));
+                    string title = ExtractRegex(metaBlock, "\"title\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
+                    if (!string.IsNullOrEmpty(title))
+                    {
+                        data.ChannelName = UnescapeJsonString(title);
+                    }
+                    string metaAv = ExtractChannelAvatarUrl(metaBlock);
+                    if (!string.IsNullOrEmpty(metaAv))
+                    {
+                        data.AvatarUrl = metaAv;
+                    }
                 }
 
-                string sub = ExtractFieldText(headerBlock, "\"subscriberCountText\"", 350);
+                string sub = ExtractFieldText(json, "\"subscriberCountText\"", 350);
+                if (string.IsNullOrEmpty(sub))
+                {
+                    sub = ExtractRegex(json, "\"content\"\\s*:\\s*\"([0-9.,]+\\s*(?:mil|mi| inscritos|subscribers)[^\"]*)\"");
+                }
                 if (!string.IsNullOrEmpty(sub))
                 {
                     data.SubscriberText = UnescapeJsonString(sub);
@@ -602,12 +883,16 @@ namespace LiteTube
 
                 if (string.IsNullOrEmpty(data.AvatarUrl))
                 {
-                    string av = ExtractRegex(headerBlock, "\"url\"\\s*:\\s*\"((?:https?:)?//yt3\\.[^\"]+)\"");
+                    string av = ExtractChannelAvatarUrl(json);
                     if (!string.IsNullOrEmpty(av))
                     {
-                        if (av.StartsWith("//")) av = "https:" + av;
                         data.AvatarUrl = av;
                     }
+                }
+
+                if (!string.IsNullOrEmpty(data.AvatarUrl))
+                {
+                    CacheChannelAvatarUrl(data.ChannelId, data.ChannelName, data.AvatarUrl);
                 }
             }
             catch { }
@@ -615,49 +900,27 @@ namespace LiteTube
 
         private string PostInnerTube(string url, string jsonPayload, AppConfig config = null, string referer = null)
         {
-            var headers = new Dictionary<string, string>
-            {
-                { "X-YouTube-Client-Name", "1" },
-                { "X-YouTube-Client-Version", "2.20240530.01.00" },
-                { "Origin", "https://www.youtube.com" }
-            };
-
-            if (config != null && !string.IsNullOrEmpty(config.CookiesFilePath) && File.Exists(config.CookiesFilePath))
-            {
-                try
-                {
-                    string cookieHeader = LoadCookieHeaderFromNetscapeFile(config.CookiesFilePath);
-                    if (!string.IsNullOrEmpty(cookieHeader))
-                    {
-                        headers["Cookie"] = cookieHeader;
-                    }
-                }
-                catch { }
-            }
-
+            var headers = GoogleSessionService.Shared.BuildWebHeaders(config, out _);
             string refUrl = !string.IsNullOrEmpty(referer) ? referer : "https://www.youtube.com/";
             return HttpPipeline.PostJson(url, jsonPayload, refUrl, headers);
         }
 
         private string PostInnerTubeMusic(string jsonPayload, AppConfig config = null, string endpointUrl = "https://music.youtube.com/youtubei/v1/browse?prettyPrint=false")
         {
-            var headers = new Dictionary<string, string>
-            {
-                { "Origin", "https://music.youtube.com" },
-                { "X-YouTube-Client-Name", "67" },
-                { "X-YouTube-Client-Version", "1.20240530.01.00" },
-                { "X-Origin", "https://music.youtube.com" }
-            };
+            var headers = GoogleSessionService.Shared.BuildMusicHeaders(config, out bool hasAuthCookies);
 
-            string cookieHeader = ResolveCookieHeaderForConfig(config);
-            if (!string.IsNullOrEmpty(cookieHeader))
+            if (!hasAuthCookies && config != null)
             {
-                headers["Cookie"] = cookieHeader;
-                string sapisidHash = BuildSapisidHashHeader(cookieHeader, "https://music.youtube.com");
-                if (!string.IsNullOrEmpty(sapisidHash))
+                string cookieHeader = ResolveCookieHeaderForConfig(config);
+                if (!string.IsNullOrEmpty(cookieHeader))
                 {
-                    headers["Authorization"] = sapisidHash;
-                    headers["X-Goog-AuthUser"] = "0";
+                    headers["Cookie"] = cookieHeader;
+                    string sapisidHash = GoogleSessionService.BuildSapisidHashHeader(cookieHeader, "https://music.youtube.com");
+                    if (!string.IsNullOrEmpty(sapisidHash))
+                    {
+                        headers["Authorization"] = sapisidHash;
+                        headers["X-Goog-AuthUser"] = "0";
+                    }
                 }
             }
 
@@ -670,38 +933,56 @@ namespace LiteTube
 
             try
             {
-                if (!string.IsNullOrEmpty(config.CookiesFilePath) && File.Exists(config.CookiesFilePath))
-                {
-                    string h = LoadCookieHeaderFromNetscapeFile(config.CookiesFilePath);
-                    if (!string.IsNullOrEmpty(h)) return h;
-                }
+                string vaultFile = CookieVault.GetVaultFilePath();
+                string legacyFile = CookieVault.GetLegacyPlaintextFilePath();
 
-                string defaultCookiesFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "cookies.txt");
-                if (File.Exists(defaultCookiesFile) && new FileInfo(defaultCookiesFile).Length > 100)
+                foreach (string candidate in new[] { config.CookiesFilePath, vaultFile, legacyFile })
                 {
-                    string h = LoadCookieHeaderFromNetscapeFile(defaultCookiesFile);
-                    if (!string.IsNullOrEmpty(h)) return h;
+                    if (!string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate))
+                    {
+                        string h = LoadCookieHeaderFromNetscapeFile(candidate);
+                        if (!string.IsNullOrEmpty(h)) return h;
+                    }
                 }
 
                 if (!string.IsNullOrEmpty(config.BrowserForCookies) && config.BrowserForCookies != "none" && File.Exists(_ytDlpPath))
                 {
-                    string tempCookiePath = Path.Combine(_cacheDir, "browser_session_cookies.txt");
-                    bool needsRefresh = !File.Exists(tempCookiePath) ||
-                                        new FileInfo(tempCookiePath).Length < 100 ||
-                                        (DateTime.UtcNow - File.GetLastWriteTimeUtc(tempCookiePath)).TotalMinutes > 20;
+                    lock (_browserCookieCacheLock)
+                    {
+                        if (!string.IsNullOrEmpty(_cachedBrowserCookieHeader) &&
+                            string.Equals(_cachedBrowserCookieBrowser, config.BrowserForCookies, StringComparison.OrdinalIgnoreCase) &&
+                            DateTime.UtcNow < _cachedBrowserCookieExpiryUtc)
+                        {
+                            return _cachedBrowserCookieHeader;
+                        }
+                    }
 
-                    if (needsRefresh)
+                    string tempCookiePath = Path.Combine(Path.GetTempPath(), "litetube_sess_" + Guid.NewGuid().ToString("N") + ".txt");
+                    try
                     {
                         string args = string.Format("--cookies-from-browser {0} --cookies \"{1}\" --skip-download --no-warnings \"https://music.youtube.com/\"",
                             config.BrowserForCookies, tempCookiePath);
                         RunYtDlpProcess(args, 10000);
-                        GoogleAuthDialog.SanitizeCookieFile(tempCookiePath);
-                    }
 
-                    if (File.Exists(tempCookiePath) && new FileInfo(tempCookiePath).Length > 100)
+                        if (File.Exists(tempCookiePath) && new FileInfo(tempCookiePath).Length > 100)
+                        {
+                            string sanitized = CookieVault.SanitizeNetscapeContent(File.ReadAllText(tempCookiePath, Encoding.UTF8));
+                            string h = CookieVault.BuildCookieHeaderFromNetscapeContent(sanitized);
+                            if (!string.IsNullOrEmpty(h))
+                            {
+                                lock (_browserCookieCacheLock)
+                                {
+                                    _cachedBrowserCookieHeader = h;
+                                    _cachedBrowserCookieBrowser = config.BrowserForCookies;
+                                    _cachedBrowserCookieExpiryUtc = DateTime.UtcNow.AddMinutes(20);
+                                }
+                                return h;
+                            }
+                        }
+                    }
+                    finally
                     {
-                        string h = LoadCookieHeaderFromNetscapeFile(tempCookiePath);
-                        if (!string.IsNullOrEmpty(h)) return h;
+                        try { if (File.Exists(tempCookiePath)) File.Delete(tempCookiePath); } catch { }
                     }
                 }
             }
@@ -939,7 +1220,10 @@ namespace LiteTube
                     ParseMusicRendererBlocksFromSegment(json, "", seenIds, results);
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Logger.Warn("YTMUSIC", "Falha ao analisar prateleiras ParseMusicCarouselShelves: " + ex.Message);
+            }
 
             return results;
         }
@@ -1073,30 +1357,8 @@ namespace LiteTube
         private static string LoadCookieHeaderFromNetscapeFile(string filePath)
         {
             if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath)) return null;
-            var sb = new StringBuilder();
-            var lines = File.ReadAllLines(filePath);
-            foreach (var rawLine in lines)
-            {
-                string line = rawLine != null ? rawLine.Trim() : "";
-                if (string.IsNullOrEmpty(line) || line.StartsWith("#")) continue;
-                string[] parts = line.Split('\t');
-                if (parts.Length >= 7)
-                {
-                    string domain = parts[0];
-                    if (domain.IndexOf("youtube.com", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                        domain.IndexOf("google.com", StringComparison.OrdinalIgnoreCase) >= 0)
-                    {
-                        string name = parts[5].Trim();
-                        string val = parts[6].Trim();
-                        if (!string.IsNullOrEmpty(name))
-                        {
-                            if (sb.Length > 0) sb.Append("; ");
-                            sb.Append(name).Append("=").Append(val);
-                        }
-                    }
-                }
-            }
-            return sb.Length > 0 ? sb.ToString() : null;
+            string plaintext = CookieVault.ReadCookiesPlaintext(filePath);
+            return CookieVault.BuildCookieHeaderFromNetscapeContent(plaintext);
         }
 
         /// <summary>
@@ -1210,20 +1472,33 @@ namespace LiteTube
                             subText = ExtractFieldText(block, "\"subscriberCountText\"", 400);
                         }
 
-                        string thumbUrl = ExtractRegex(block, "\"url\"\\s*:\\s*\"((?:https?:)?//[^\"]+)\"");
-                        if (!string.IsNullOrEmpty(thumbUrl) && thumbUrl.StartsWith("//"))
-                            thumbUrl = "https:" + thumbUrl;
+                        string thumbUrl = ExtractChannelAvatarUrl(block);
+                        if (string.IsNullOrEmpty(thumbUrl))
+                        {
+                            thumbUrl = ExtractRegex(block, "\"url\"\\s*:\\s*\"((?:https?:)?//[^\"]+)\"");
+                            if (!string.IsNullOrEmpty(thumbUrl))
+                            {
+                                thumbUrl = NormalizeAvatarUrl(thumbUrl);
+                            }
+                        }
+
+                        string cleanChTitle = UnescapeJsonString(chTitle);
+                        if (!string.IsNullOrEmpty(thumbUrl))
+                        {
+                            CacheChannelAvatarUrl(channelId, cleanChTitle, thumbUrl);
+                        }
 
                         seenIds.Add(channelId);
                         page.Items.Add(new TrackItem
                         {
                             Id = "CH_" + channelId,
                             ChannelId = channelId,
-                            Title = UnescapeJsonString(chTitle),
+                            Title = cleanChTitle,
                             Artist = !string.IsNullOrEmpty(subText) ? UnescapeJsonString(subText) : "Canal Oficial • Clique para ver vídeos e playlists",
                             Duration = "CANAL",
                             ItemType = "channel",
                             CustomThumbUrl = thumbUrl,
+                            ChannelAvatarUrl = thumbUrl,
                             SubscriberCountText = UnescapeJsonString(subText)
                         });
                     }
@@ -1295,14 +1570,35 @@ namespace LiteTube
                     {
                         thumbUrl = ExtractRegex(block, "\"url\"\\s*:\\s*\"((?:https?:)?//[^\"]*?ggpht\\.com/[^\"]+)\"");
                     }
-                    if (!string.IsNullOrEmpty(thumbUrl) && thumbUrl.StartsWith("//"))
+                    if (!string.IsNullOrEmpty(thumbUrl))
                     {
-                        thumbUrl = "https:" + thumbUrl;
+                        thumbUrl = UnescapeJsonString(thumbUrl).Replace("\\/", "/");
+                        if (thumbUrl.StartsWith("//")) thumbUrl = "https:" + thumbUrl;
                     }
+
+                    string channelAvatarUrl = ExtractChannelAvatarUrl(block);
+
+                    string viewCountText = ExtractFieldText(block, "\"viewCountText\"", 300);
+                    if (string.IsNullOrEmpty(viewCountText))
+                    {
+                        viewCountText = ExtractFieldText(block, "\"shortViewCountText\"", 300);
+                    }
+                    string publishedTimeText = ExtractFieldText(block, "\"publishedTimeText\"", 300);
 
                     title = UnescapeJsonString(title);
                     artist = UnescapeJsonString(artist).Replace(" - Topic", "");
+                    viewCountText = UnescapeJsonString(viewCountText);
+                    publishedTimeText = UnescapeJsonString(publishedTimeText);
                     int durationSec = ParseDurationToSeconds(duration);
+
+                    if (!string.IsNullOrEmpty(channelAvatarUrl))
+                    {
+                        CacheChannelAvatarUrl(channelId, artist, channelAvatarUrl);
+                    }
+                    else
+                    {
+                        channelAvatarUrl = GetCachedChannelAvatarUrl(channelId, artist);
+                    }
 
                     if (isVideoMode && IsShortsVideo(title, durationSec, block))
                         continue;
@@ -1317,6 +1613,9 @@ namespace LiteTube
                         DurationSeconds = durationSec,
                         ChannelId = channelId,
                         CustomThumbUrl = thumbUrl,
+                        ChannelAvatarUrl = channelAvatarUrl,
+                        ViewCountText = viewCountText,
+                        PublishedTimeText = publishedTimeText,
                         ItemType = "video",
                         IsAlbum = !isVideoMode && durationSec >= 1200
                     });
@@ -1384,10 +1683,25 @@ namespace LiteTube
 
                         string chId = ExtractRegex(b, "\"browseId\"\\s*:\\s*\"(UC[a-zA-Z0-9_-]+)\"");
                         string thumbUrl = ExtractRegex(b, "\"url\"\\s*:\\s*\"((?:https?:)?//i\\.ytimg\\.com/[^\"]+)\"");
-                        if (!string.IsNullOrEmpty(thumbUrl) && thumbUrl.StartsWith("//")) thumbUrl = "https:" + thumbUrl;
+                        if (!string.IsNullOrEmpty(thumbUrl))
+                        {
+                            thumbUrl = UnescapeJsonString(thumbUrl).Replace("\\/", "/");
+                            if (thumbUrl.StartsWith("//")) thumbUrl = "https:" + thumbUrl;
+                        }
+
+                        string channelAvatarUrl = ExtractChannelAvatarUrl(b);
 
                         title = UnescapeJsonString(title);
                         artist = UnescapeJsonString(artist).Replace(" - Topic", "");
+
+                        if (!string.IsNullOrEmpty(channelAvatarUrl))
+                        {
+                            CacheChannelAvatarUrl(chId, artist, channelAvatarUrl);
+                        }
+                        else
+                        {
+                            channelAvatarUrl = GetCachedChannelAvatarUrl(chId, artist);
+                        }
 
                         seenIds.Add(vidId);
                         page.Items.Add(new TrackItem
@@ -1399,6 +1713,7 @@ namespace LiteTube
                             DurationSeconds = durationSec,
                             ChannelId = chId,
                             CustomThumbUrl = thumbUrl,
+                            ChannelAvatarUrl = channelAvatarUrl,
                             ItemType = "video",
                             IsAlbum = !isVideoMode && durationSec >= 1200
                         });
@@ -1590,7 +1905,7 @@ namespace LiteTube
                 if (!requireBrowserCookies && !isAccountFeed)
                 {
                     string publicArgs = string.Format(
-                        "--yes-playlist --flat-playlist --playlist-start {0} --playlist-end {1} --extractor-args \"youtubetab:skip=authcheck\" --print \"%(id)s\t%(title)s\t%(uploader)s\t%(duration_string)s\" --no-warnings \"{2}\"",
+                        "--yes-playlist --flat-playlist --playlist-start {0} --playlist-end {1} --extractor-args \"youtubetab:skip=authcheck\" --print \"%(id)s\t%(title)s\t%(uploader)s\t%(duration_string)s\t%(channel_id)s\" --no-warnings \"{2}\"",
                         startIndex,
                         endIndex,
                         normalizedTarget.Replace("\"", "")
@@ -1603,12 +1918,13 @@ namespace LiteTube
                     }
                 }
 
-                string cookieArg = GetCookieArg(config);
+                using var cookieScope = CookieVault.CreateYtDlpCookieScope(config?.CookiesFilePath, config?.BrowserForCookies);
+                string cookieArg = cookieScope.Arg;
 
                 if (!string.IsNullOrEmpty(cookieArg) || requireBrowserCookies || isAccountFeed)
                 {
                     string args = string.Format(
-                        "{0}--yes-playlist --flat-playlist --playlist-start {1} --playlist-end {2} --extractor-args \"youtubetab:skip=authcheck\" --print \"%(id)s\t%(title)s\t%(uploader)s\t%(duration_string)s\" --no-warnings \"{3}\"",
+                        "{0}--yes-playlist --flat-playlist --playlist-start {1} --playlist-end {2} --extractor-args \"youtubetab:skip=authcheck\" --print \"%(id)s\t%(title)s\t%(uploader)s\t%(duration_string)s\t%(channel_id)s\" --no-warnings \"{3}\"",
                         cookieArg,
                         startIndex,
                         endIndex,
@@ -1638,15 +1954,6 @@ namespace LiteTube
             });
         }
 
-        /// <summary>
-        /// Fetches personalized recommended videos directly from YouTube's Home feed using browser cookies.
-        /// Filters out Shorts, Mixes, and non-video items.
-        /// </summary>
-        public async Task<Tuple<List<TrackItem>, string>> FetchRecommendedVideosAsync(AppConfig config, int limit = 60)
-        {
-            return await FetchUrlOrPlaylistAsync("https://www.youtube.com/", config, true);
-        }
-
         private List<TrackItem> ParseFlatPlaylistOutput(string output)
         {
             var list = new List<TrackItem>();
@@ -1672,6 +1979,9 @@ namespace LiteTube
                     string dur = (parts.Length >= 4 && !string.IsNullOrEmpty(parts[3]) && parts[3] != "NA")
                         ? parts[3].Trim()
                         : "--:--";
+                    string chId = (parts.Length >= 5 && !string.IsNullOrEmpty(parts[4]) && parts[4] != "NA")
+                        ? parts[4].Trim()
+                        : "";
 
                     int durSec = ParseDurationToSeconds(dur);
                     if (IsShortsVideo(title, durSec, "")) continue;
@@ -1682,7 +1992,9 @@ namespace LiteTube
                         Title = title,
                         Artist = artist,
                         Duration = dur,
-                        DurationSeconds = ParseDurationToSeconds(dur),
+                        DurationSeconds = durSec,
+                        ChannelId = chId,
+                        ChannelAvatarUrl = GetCachedChannelAvatarUrl(chId, artist),
                         ItemType = "video"
                     });
                 }
@@ -1754,20 +2066,8 @@ namespace LiteTube
             catch { }
         }
 
-        private static string GetCookieArg(AppConfig config)
-        {
-            if (config == null) return "";
-            if (!string.IsNullOrEmpty(config.CookiesFilePath) && File.Exists(config.CookiesFilePath))
-            {
-                GoogleAuthDialog.SanitizeCookieFile(config.CookiesFilePath);
-                return string.Format("--cookies \"{0}\" ", config.CookiesFilePath);
-            }
-            if (!string.IsNullOrEmpty(config.BrowserForCookies) && config.BrowserForCookies != "none")
-            {
-                return string.Format("--cookies-from-browser {0} ", config.BrowserForCookies);
-            }
-            return "";
-        }
+        private static CookieVault.YtDlpCookieScope CreateCookieScope(AppConfig config)
+            => CookieVault.CreateYtDlpCookieScope(config?.CookiesFilePath, config?.BrowserForCookies);
 
         private string RunYtDlpFastUrl(string arguments, int timeoutMs)
         {
@@ -1927,6 +2227,16 @@ namespace LiteTube
                 }
             }
 
+            if (!string.IsNullOrEmpty(track.Id) && _audioUrlMemoryCache.TryGetValue(track.Id, out var cachedMem))
+            {
+                if (!string.IsNullOrEmpty(cachedMem.Url) && cachedMem.ExpiresAtUtc > DateTime.UtcNow)
+                {
+                    Logger.Info("PREFETCH", string.Format("Stream de áudio pré-resolvido em RAM reutilizado para Id={0} ('{1}')", track.Id, track.Title));
+                    return cachedMem.Url;
+                }
+                _audioUrlMemoryCache.TryRemove(track.Id, out _);
+            }
+
             int maxCacheMB = (config != null && config.MaxCacheSizeMB >= 15) ? config.MaxCacheSizeMB : 100;
 
             return await Task.Run(() =>
@@ -1936,14 +2246,15 @@ namespace LiteTube
                 Logger.Info("MUSIC", string.Format("Resolvendo stream de áudio: Id={0}, Title='{1}', Artist='{2}'", track.Id, track.Title, track.Artist));
 
                 string videoUrl = "https://www.youtube.com/watch?v=" + track.Id;
-                string cookieArg = GetCookieArg(config);
+                using var cookieScope = CookieVault.CreateYtDlpCookieScope(config?.CookiesFilePath, config?.BrowserForCookies);
+                string cookieArg = cookieScope.Arg;
                 string denoPath = Path.Combine(_binDir, "deno.exe");
                 string jsArg = File.Exists(denoPath) ? string.Format("--js-runtimes \"deno:{0}\" ", denoPath) : "";
                 string formatSelector = "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio";
 
                 // Step 1: Extração rápida via yt-dlp com cookies e Deno JS runtime (pipeline padrão estável)
                 string attempt1Args = string.Format(
-                    "{0}{1}--no-playlist --extractor-args \"youtube:player_skip=hls\" -f \"{2}\" -g \"{3}\"",
+                    "{0}{1}--no-playlist --no-warnings --extractor-args \"youtube:skip=hls,translated_subs\" -f \"{2}\" -g \"{3}\"",
                     !string.IsNullOrEmpty(cookieArg) ? cookieArg : "",
                     jsArg,
                     formatSelector,
@@ -1975,7 +2286,7 @@ namespace LiteTube
                         }
 
                         attempt1Args = string.Format(
-                            "{0}{1}--no-playlist --extractor-args \"youtube:player_skip=hls\" -f \"{2}\" -g \"{3}\"",
+                            "{0}{1}--no-playlist --no-warnings --extractor-args \"youtube:skip=hls,translated_subs\" -f \"{2}\" -g \"{3}\"",
                             !string.IsNullOrEmpty(cookieArg) ? cookieArg : "",
                             jsArg,
                             formatSelector,
@@ -1994,7 +2305,7 @@ namespace LiteTube
                 if (string.IsNullOrEmpty(directUrl) && !token.IsCancellationRequested)
                 {
                     string attempt2Args = string.Format(
-                        "{0}--no-playlist --extractor-args \"youtube:player_skip=hls\" -f \"{1}\" -g \"{2}\"",
+                        "{0}--no-playlist --no-warnings --extractor-args \"youtube:skip=hls,translated_subs\" -f \"{1}\" -g \"{2}\"",
                         jsArg,
                         formatSelector,
                         videoUrl
@@ -2005,12 +2316,13 @@ namespace LiteTube
                 // Step 3: Fallback via client visionos
                 if (string.IsNullOrEmpty(directUrl) && !token.IsCancellationRequested)
                 {
-                    directUrl = RunYtDlpFastUrl(string.Format("--no-playlist --extractor-args \"youtube:player_client=visionos;player_skip=hls\" -f \"{0}\" -g \"{1}\"", formatSelector, videoUrl), 8000);
+                    directUrl = RunYtDlpFastUrl(string.Format("--no-playlist --no-warnings --extractor-args \"youtube:player_client=visionos;skip=hls,translated_subs\" -f \"{0}\" -g \"{1}\"", formatSelector, videoUrl), 8000);
                 }
 
-                // If directUrl resolved, return directly for instant zero-disk streaming!
+                // If directUrl resolved, cache in RAM and return directly for instant zero-disk streaming!
                 if (!string.IsNullOrEmpty(directUrl))
                 {
+                    CacheResolvedAudioUrl(track.Id, directUrl);
                     Logger.Info("MUSIC", string.Format("Stream direto resolvido com sucesso para Id={0} ('{1}')", track.Id, track.Title));
                     return directUrl;
                 }
@@ -2066,6 +2378,73 @@ namespace LiteTube
                 Logger.Error("MUSIC", string.Format("Não foi possível resolver áudio para Id={0} ('{1}') após todas as tentativas.", track.Id, track.Title));
                 return null;
             }, token);
+        }
+
+        private static void CacheResolvedAudioUrl(string videoId, string url)
+        {
+            if (string.IsNullOrEmpty(videoId) || string.IsNullOrEmpty(url)) return;
+            DateTime now = DateTime.UtcNow;
+            if (_audioUrlMemoryCache.Count >= 64)
+            {
+                foreach (var kv in _audioUrlMemoryCache)
+                {
+                    if (kv.Value.ExpiresAtUtc <= now)
+                    {
+                        _audioUrlMemoryCache.TryRemove(kv.Key, out _);
+                    }
+                }
+                if (_audioUrlMemoryCache.Count >= 64)
+                {
+                    _audioUrlMemoryCache.Clear();
+                }
+            }
+            _audioUrlMemoryCache[videoId] = (url, now.AddHours(2));
+        }
+
+        public static bool HasCachedAudioUrl(string videoId)
+        {
+            if (string.IsNullOrEmpty(videoId)) return false;
+            if (_audioUrlMemoryCache.TryGetValue(videoId, out var entry))
+            {
+                return !string.IsNullOrEmpty(entry.Url) && entry.ExpiresAtUtc > DateTime.UtcNow;
+            }
+            return false;
+        }
+
+        public async Task<bool> PrefetchAudioUrlOnHoverAsync(TrackItem track, AppConfig config, CancellationToken token)
+        {
+            if (track == null || string.IsNullOrEmpty(track.Id) || token.IsCancellationRequested) return false;
+            if (HasCachedAudioUrl(track.Id)) return true;
+
+            string safeId = Regex.Replace(track.Id, "[^a-zA-Z0-9_-]", "");
+            string cachedFile = Path.Combine(_cacheDir, safeId + ".m4a");
+            if (File.Exists(cachedFile) && new FileInfo(cachedFile).Length > 10240) return true;
+
+            return await Task.Run(() =>
+            {
+                if (token.IsCancellationRequested) return false;
+                string videoUrl = "https://www.youtube.com/watch?v=" + track.Id;
+                using var cookieScope = CookieVault.CreateYtDlpCookieScope(config?.CookiesFilePath, config?.BrowserForCookies);
+                string cookieArg = cookieScope.Arg;
+                string denoPath = Path.Combine(_binDir, "deno.exe");
+                string jsArg = File.Exists(denoPath) ? string.Format("--js-runtimes \"deno:{0}\" ", denoPath) : "";
+                string formatSelector = "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio";
+
+                string args = string.Format(
+                    "{0}{1}--no-playlist --no-warnings --extractor-args \"youtube:skip=hls,translated_subs\" -f \"{2}\" -g \"{3}\"",
+                    !string.IsNullOrEmpty(cookieArg) ? cookieArg : "",
+                    jsArg,
+                    formatSelector,
+                    videoUrl);
+
+                string resolved = RunYtDlpFastUrl(args, 12000);
+                if (!string.IsNullOrEmpty(resolved) && !token.IsCancellationRequested)
+                {
+                    CacheResolvedAudioUrl(track.Id, resolved);
+                    return true;
+                }
+                return false;
+            }, token).ConfigureAwait(false);
         }
 
         public void PrefetchTrackInBackground(TrackItem nextTrack, AppConfig config)
@@ -2268,20 +2647,36 @@ namespace LiteTube
 
         public static int ParseDurationToSeconds(string dur)
         {
-            if (string.IsNullOrEmpty(dur) || dur == "--:--") return 0;
+            if (string.IsNullOrWhiteSpace(dur) || dur == "--:--") return 0;
             try
             {
-                string[] parts = dur.Split(':');
-                if (parts.Length == 2)
+                string trimmed = dur.Trim();
+                if (!trimmed.Contains(":"))
                 {
-                    return int.Parse(parts[0]) * 60 + int.Parse(parts[1]);
+                    if (double.TryParse(trimmed, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out double rawSec))
+                        return (int)Math.Round(rawSec);
+                    return 0;
                 }
-                if (parts.Length == 3)
+
+                string[] parts = trimmed.Split(':');
+                if (parts.Length == 2 &&
+                    int.TryParse(parts[0].Trim(), out int m2) &&
+                    double.TryParse(parts[1].Trim(), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out double s2))
                 {
-                    return int.Parse(parts[0]) * 3600 + int.Parse(parts[1]) * 60 + int.Parse(parts[2]);
+                    return m2 * 60 + (int)Math.Round(s2);
+                }
+                if (parts.Length == 3 &&
+                    int.TryParse(parts[0].Trim(), out int h3) &&
+                    int.TryParse(parts[1].Trim(), out int m3) &&
+                    double.TryParse(parts[2].Trim(), System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out double s3))
+                {
+                    return h3 * 3600 + m3 * 60 + (int)Math.Round(s3);
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Logger.Warn("PARSER", "Falha em ParseDurationToSeconds ('" + dur + "'): " + ex.Message);
+            }
             return 0;
         }
 

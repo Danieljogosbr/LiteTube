@@ -1,7 +1,6 @@
 #nullable enable
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Net.Security;
@@ -14,13 +13,16 @@ namespace LiteTube
 {
     /// <summary>
     /// Modern managed HTTP pipeline for .NET 8 powered by native SocketsHttpHandler.
-    /// Provides full support for HTTP/2, HTTP/3 (QUIC), connection pooling (64 connections per host),
-    /// Brotli/Gzip/Deflate decompression, and TLS 1.2 / TLS 1.3 negotiation.
+    /// Provides HTTP/2 multiplexing, balanced connection pooling (16 connections per host),
+    /// Brotli/Gzip/Deflate decompression, TLS 1.2 / TLS 1.3 negotiation,
+    /// lightweight API concurrency throttling, and automatic backoff on 429/503 responses.
     /// </summary>
     public static class HttpPipeline
     {
         private static readonly SocketsHttpHandler _handler;
         private static readonly HttpClient _client;
+        private static readonly SemaphoreSlim _apiConcurrencyGate = new SemaphoreSlim(8, 8);
+        private static long _rateLimitUntilTicks = 0;
 
         public const string DefaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
@@ -28,21 +30,24 @@ namespace LiteTube
         {
             _handler = new SocketsHttpHandler
             {
-                // Pool de conexões otimizado para streaming e alta concorrência de miniaturas
-                MaxConnectionsPerServer = 64,
-                PooledConnectionLifetime = TimeSpan.FromMinutes(15),
+                // Desativa proxy herdado do sistema para evitar erros WSAEACCES (10013) em portas locais bloqueadas
+                UseProxy = false,
+                Proxy = null,
+                // Pool equilibrado com HTTP/2 multiplexing (reduz consumo de RAM mantendo alta vazão)
+                MaxConnectionsPerServer = 16,
+                PooledConnectionLifetime = TimeSpan.FromMinutes(10),
                 PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2),
                 KeepAlivePingDelay = TimeSpan.FromSeconds(30),
                 KeepAlivePingTimeout = TimeSpan.FromSeconds(5),
-                KeepAlivePingPolicy = HttpKeepAlivePingPolicy.Always,
+                KeepAlivePingPolicy = HttpKeepAlivePingPolicy.WithActiveRequests,
 
                 // Descompressão nativa de alta performance (GZip, Deflate e Brotli via SIMD)
                 AutomaticDecompression = DecompressionMethods.All,
 
-                // Suporte avançado a HTTP/2 Multiplexing com múltiplos canais
+                // Suporte a HTTP/2 Multiplexing
                 EnableMultipleHttp2Connections = true,
 
-                // Desativa cookies automáticos gerenciados pelo handler (LiteTube gerencia cookies Netscape)
+                // Desativa cookies automáticos gerenciados pelo handler (LiteTube gerencia cookies via CookieVault)
                 UseCookies = false,
                 AllowAutoRedirect = true,
                 MaxAutomaticRedirections = 5,
@@ -68,30 +73,111 @@ namespace LiteTube
         public static HttpClient Client => _client;
         public static SocketsHttpHandler Handler => _handler;
 
+        private static async Task WaitIfRateLimitedAsync(CancellationToken ct)
+        {
+            long untilTicks = Interlocked.Read(ref _rateLimitUntilTicks);
+            if (untilTicks <= 0) return;
+
+            long nowTicks = DateTime.UtcNow.Ticks;
+            if (untilTicks > nowTicks)
+            {
+                TimeSpan remaining = TimeSpan.FromTicks(untilTicks - nowTicks);
+                if (remaining > TimeSpan.FromSeconds(15))
+                {
+                    remaining = TimeSpan.FromSeconds(15);
+                }
+                await Task.Delay(remaining, ct).ConfigureAwait(false);
+            }
+        }
+
+        private static TimeSpan ComputeBackoffDelay(HttpResponseMessage resp, int attempt)
+        {
+            if (resp.Headers.RetryAfter != null)
+            {
+                if (resp.Headers.RetryAfter.Delta.HasValue)
+                {
+                    double sec = Math.Max(1.0, Math.Min(15.0, resp.Headers.RetryAfter.Delta.Value.TotalSeconds));
+                    return TimeSpan.FromSeconds(sec);
+                }
+                if (resp.Headers.RetryAfter.Date.HasValue)
+                {
+                    double sec = (resp.Headers.RetryAfter.Date.Value.UtcDateTime - DateTime.UtcNow).TotalSeconds;
+                    if (sec > 0.5)
+                    {
+                        return TimeSpan.FromSeconds(Math.Min(15.0, sec));
+                    }
+                }
+            }
+
+            // Backoff exponencial conservador: 1.0s na 1ª tentativa, 2.5s na 2ª tentativa
+            return attempt == 0 ? TimeSpan.FromSeconds(1.0) : TimeSpan.FromSeconds(2.5);
+        }
+
+        private static void RecordRateLimitWindow(TimeSpan delay)
+        {
+            long targetTicks = DateTime.UtcNow.Add(delay).Ticks;
+            long current;
+            do
+            {
+                current = Interlocked.Read(ref _rateLimitUntilTicks);
+                if (current >= targetTicks) return;
+            } while (Interlocked.CompareExchange(ref _rateLimitUntilTicks, targetTicks, current) != current);
+        }
+
+        private static bool IsTransientRateLimitStatus(HttpStatusCode code)
+        {
+            return code == (HttpStatusCode)429 || code == HttpStatusCode.ServiceUnavailable;
+        }
+
         public static async Task<string> PostJsonAsync(string url, string jsonPayload, string? referer = null, IDictionary<string, string>? customHeaders = null, CancellationToken ct = default)
         {
-            using (var req = new HttpRequestMessage(HttpMethod.Post, url))
+            await _apiConcurrencyGate.WaitAsync(ct).ConfigureAwait(false);
+            try
             {
-                req.Content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
-
-                if (!string.IsNullOrEmpty(referer))
+                const int maxAttempts = 3;
+                for (int attempt = 0; attempt < maxAttempts; attempt++)
                 {
-                    req.Headers.Referrer = new Uri(referer);
-                }
+                    await WaitIfRateLimitedAsync(ct).ConfigureAwait(false);
 
-                if (customHeaders != null)
-                {
-                    foreach (var kv in customHeaders)
+                    using (var req = new HttpRequestMessage(HttpMethod.Post, url))
                     {
-                        req.Headers.TryAddWithoutValidation(kv.Key, kv.Value);
+                        req.Content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
+
+                        if (!string.IsNullOrEmpty(referer))
+                        {
+                            req.Headers.Referrer = new Uri(referer);
+                        }
+
+                        if (customHeaders != null)
+                        {
+                            foreach (var kv in customHeaders)
+                            {
+                                req.Headers.TryAddWithoutValidation(kv.Key, kv.Value);
+                            }
+                        }
+
+                        using (var resp = await _client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false))
+                        {
+                            if (IsTransientRateLimitStatus(resp.StatusCode) && attempt < maxAttempts - 1)
+                            {
+                                TimeSpan delay = ComputeBackoffDelay(resp, attempt);
+                                RecordRateLimitWindow(delay);
+                                Logger.Warn("HTTP", string.Format("HTTP {0} em POST; aplicando backoff de {1:0.0}s (tentativa {2}/{3}).",
+                                    (int)resp.StatusCode, delay.TotalSeconds, attempt + 1, maxAttempts));
+                                continue;
+                            }
+
+                            resp.EnsureSuccessStatusCode();
+                            return await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                        }
                     }
                 }
 
-                using (var resp = await _client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false))
-                {
-                    resp.EnsureSuccessStatusCode();
-                    return await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                }
+                throw new HttpRequestException("Limite de tentativas atingido em PostJsonAsync.");
+            }
+            finally
+            {
+                _apiConcurrencyGate.Release();
             }
         }
 
@@ -108,7 +194,7 @@ namespace LiteTube
                 {
                     if (resp.IsSuccessStatusCode)
                     {
-                        return await resp.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+                        return await resp.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
                     }
                 }
             }
@@ -119,29 +205,48 @@ namespace LiteTube
             return null;
         }
 
-        public static byte[]? GetByteArray(string url)
-        {
-            return GetByteArrayAsync(url).GetAwaiter().GetResult();
-        }
-
         public static async Task<string?> GetStringAsync(string url, string? referer = null, CancellationToken ct = default)
         {
-            using (var req = new HttpRequestMessage(HttpMethod.Get, url))
+            await _apiConcurrencyGate.WaitAsync(ct).ConfigureAwait(false);
+            try
             {
-                if (!string.IsNullOrEmpty(referer))
+                const int maxAttempts = 3;
+                for (int attempt = 0; attempt < maxAttempts; attempt++)
                 {
-                    req.Headers.Referrer = new Uri(referer);
-                }
+                    await WaitIfRateLimitedAsync(ct).ConfigureAwait(false);
 
-                using (var resp = await _client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false))
-                {
-                    if (resp.IsSuccessStatusCode)
+                    using (var req = new HttpRequestMessage(HttpMethod.Get, url))
                     {
-                        return await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                        if (!string.IsNullOrEmpty(referer))
+                        {
+                            req.Headers.Referrer = new Uri(referer);
+                        }
+
+                        using (var resp = await _client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false))
+                        {
+                            if (IsTransientRateLimitStatus(resp.StatusCode) && attempt < maxAttempts - 1)
+                            {
+                                TimeSpan delay = ComputeBackoffDelay(resp, attempt);
+                                RecordRateLimitWindow(delay);
+                                Logger.Warn("HTTP", string.Format("HTTP {0} em GET; aplicando backoff de {1:0.0}s (tentativa {2}/{3}).",
+                                    (int)resp.StatusCode, delay.TotalSeconds, attempt + 1, maxAttempts));
+                                continue;
+                            }
+
+                            if (resp.IsSuccessStatusCode)
+                            {
+                                return await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                            }
+                            return null;
+                        }
                     }
                 }
+                return null;
             }
-            return null;
+            finally
+            {
+                _apiConcurrencyGate.Release();
+            }
         }
 
         /// <summary>

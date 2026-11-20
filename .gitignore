@@ -25,3 +25,4 @@ bin/ffprobe.exe
 # Diretório de rascunho e distribuição
 scratch/
 dist/
+GEMINI.md

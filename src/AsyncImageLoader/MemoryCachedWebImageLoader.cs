@@ -29,9 +29,8 @@ namespace AsyncImageLoader.Loaders
 
         private const int MaxCacheEntries = 200;
 
-        public MemoryCachedWebImageLoader(int maxRamItems = 200, string cacheFolder = null)
+        public MemoryCachedWebImageLoader(int maxRamItems = 200)
         {
-            // Construtor mantido para compatibilidade total; não realiza I/O de disco
         }
 
         public Task<BitmapSource> ProvideImageAsync(string url)
@@ -47,6 +46,8 @@ namespace AsyncImageLoader.Loaders
         public static async Task<BitmapSource> LoadImageAsync(string url, int decodePixelWidth, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(url)) return null;
+            url = url.Replace("\\/", "/").Replace("\\u0026", "&").Trim();
+            if (url.StartsWith("//")) url = "https:" + url;
             if (decodePixelWidth <= 0) decodePixelWidth = 320;
 
             string cacheKey = string.Format("{0}_{1}", url, decodePixelWidth);
@@ -104,6 +105,27 @@ namespace AsyncImageLoader.Loaders
             }
             catch
             {
+                try
+                {
+                    using (var stream = new MemoryStream(bytes))
+                    {
+                        var decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.IgnoreColorProfile, BitmapCacheOption.OnLoad);
+                        if (decoder.Frames != null && decoder.Frames.Count > 0)
+                        {
+                            BitmapSource frame = decoder.Frames[0];
+                            if (decodePixelWidth > 0 && frame.PixelWidth > decodePixelWidth)
+                            {
+                                double scale = (double)decodePixelWidth / frame.PixelWidth;
+                                var tb = new TransformedBitmap(frame, new System.Windows.Media.ScaleTransform(scale, scale));
+                                if (tb.CanFreeze) tb.Freeze();
+                                return tb;
+                            }
+                            if (frame.CanFreeze) frame.Freeze();
+                            return frame;
+                        }
+                    }
+                }
+                catch { }
                 return null;
             }
         }
@@ -115,31 +137,32 @@ namespace AsyncImageLoader.Loaders
 
             try
             {
-                var response = await HttpClient.GetAsync(url, ct).ConfigureAwait(false);
-
-                // Fallback 404: se hqdefault ou maxres falhar, tenta mqdefault automaticamente
-                if (response.StatusCode == HttpStatusCode.NotFound)
+                using (var response = await HttpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false))
                 {
-                    if (url.Contains("maxresdefault.jpg"))
-                        return await DownloadBytesWithFallbackAsync(url.Replace("maxresdefault.jpg", "hqdefault.jpg"), ct).ConfigureAwait(false);
-                    if (url.Contains("hqdefault.jpg"))
-                        return await DownloadBytesWithFallbackAsync(url.Replace("hqdefault.jpg", "mqdefault.jpg"), ct).ConfigureAwait(false);
-
-                    var idMatch = Regex.Match(url, @"/vi(?:_webp)?/([a-zA-Z0-9_-]{11})");
-                    if (idMatch.Success)
+                    // Fallback 404: se hqdefault ou maxres falhar, tenta mqdefault automaticamente
+                    if (response.StatusCode == HttpStatusCode.NotFound)
                     {
-                        string vidId = idMatch.Groups[1].Value;
-                        string mqUrl = "https://i.ytimg.com/vi/" + vidId + "/mqdefault.jpg";
-                        if (!url.Equals(mqUrl, StringComparison.OrdinalIgnoreCase))
-                        {
-                            return await DownloadBytesWithFallbackAsync(mqUrl, ct).ConfigureAwait(false);
-                        }
-                    }
-                    return null;
-                }
+                        if (url.Contains("maxresdefault.jpg"))
+                            return await DownloadBytesWithFallbackAsync(url.Replace("maxresdefault.jpg", "hqdefault.jpg"), ct).ConfigureAwait(false);
+                        if (url.Contains("hqdefault.jpg"))
+                            return await DownloadBytesWithFallbackAsync(url.Replace("hqdefault.jpg", "mqdefault.jpg"), ct).ConfigureAwait(false);
 
-                response.EnsureSuccessStatusCode();
-                return await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
+                        var idMatch = Regex.Match(url, @"/vi(?:_webp)?/([a-zA-Z0-9_-]{11})");
+                        if (idMatch.Success)
+                        {
+                            string vidId = idMatch.Groups[1].Value;
+                            string mqUrl = "https://i.ytimg.com/vi/" + vidId + "/mqdefault.jpg";
+                            if (!url.Equals(mqUrl, StringComparison.OrdinalIgnoreCase))
+                            {
+                                return await DownloadBytesWithFallbackAsync(mqUrl, ct).ConfigureAwait(false);
+                            }
+                        }
+                        return null;
+                    }
+
+                    response.EnsureSuccessStatusCode();
+                    return await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
+                }
             }
             catch
             {
@@ -157,31 +180,5 @@ namespace AsyncImageLoader.Loaders
         {
             ClearMemoryCache();
         }
-    }
-
-    // Aliases retrocompatíveis
-    [Obsolete("Substituído por MemoryCachedWebImageLoader (100% RAM, zero disco)")]
-    public class DiskCachedWebImageLoader : MemoryCachedWebImageLoader
-    {
-        public DiskCachedWebImageLoader(string cacheFolder = null) : base(200, cacheFolder) { }
-    }
-
-    [Obsolete("Substituído por MemoryCachedWebImageLoader (100% RAM, zero disco)")]
-    public class RamCachedWebImageLoader : MemoryCachedWebImageLoader
-    {
-        public RamCachedWebImageLoader(int maxRamItems = 200, string cacheFolder = null) : base(maxRamItems, cacheFolder) { }
-    }
-}
-
-namespace LiteTube.Network
-{
-    public class MemoryCachedWebImageLoader : AsyncImageLoader.Loaders.MemoryCachedWebImageLoader
-    {
-        public MemoryCachedWebImageLoader(int maxRamItems = 200, string cacheFolder = null) : base(maxRamItems, cacheFolder) { }
-    }
-
-    public static class LiteHttpClient
-    {
-        public static HttpClient Instance => LiteTube.HttpPipeline.Client;
     }
 }

@@ -71,8 +71,12 @@ namespace LiteTube
                 string ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
                 _playerConfig.Demuxer.FormatOpt["user_agent"] = ua;
                 _playerConfig.Demuxer.FormatOpt["headers"] = "User-Agent: " + ua + "\r\n";
+                _playerConfig.Demuxer.FormatOpt["probesize"] = "524288";
+                _playerConfig.Demuxer.FormatOpt["analyzeduration"] = "500000";
                 _playerConfig.Demuxer.AudioFormatOpt["user_agent"] = ua;
                 _playerConfig.Demuxer.AudioFormatOpt["headers"] = "User-Agent: " + ua + "\r\n";
+                _playerConfig.Demuxer.AudioFormatOpt["probesize"] = "524288";
+                _playerConfig.Demuxer.AudioFormatOpt["analyzeduration"] = "500000";
                 _playerConfig.Demuxer.FormatOpt["reconnect"] = "1";
                 _playerConfig.Demuxer.FormatOpt["reconnect_streamed"] = "1";
                 _playerConfig.Demuxer.FormatOpt["reconnect_delay_max"] = "5";
@@ -338,15 +342,6 @@ namespace LiteTube
             if (QueueUpdated != null) SafeDispatch(QueueUpdated);
         }
 
-        public void ClearQueue()
-        {
-            Stop();
-            _queue.Clear();
-            _currentIndex = -1;
-            if (QueueUpdated != null) SafeDispatch(QueueUpdated);
-            if (TrackChanged != null) SafeDispatch(delegate { TrackChanged(null); });
-        }
-
         public async void PlayIndex(int index)
         {
             if (index < 0 || index >= _queue.Count) return;
@@ -432,6 +427,9 @@ namespace LiteTube
             string failMsg = "";
             try
             {
+                await Program.EngineReadyTask.ConfigureAwait(true);
+                if (token.IsCancellationRequested || _isDisposed) return;
+
                 EnsurePlayerCreated();
 
                 ApplyAudioSettingsToPlayer();

@@ -1,0 +1,405 @@
+<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Background="#0F0F0F">
+    <Grid.Resources>
+        <!-- ScrollBar ultra-discreta no tema escuro (elimina barra branca contrastante) -->
+        <Style x:Key="DarkThinScrollBar" TargetType="ScrollBar">
+            <Setter Property="Width" Value="7"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ScrollBar">
+                        <Grid Background="Transparent">
+                            <Track x:Name="PART_Track" IsDirectionReversed="True">
+                                <Track.Thumb>
+                                    <Thumb>
+                                        <Thumb.Template>
+                                            <ControlTemplate TargetType="Thumb">
+                                                <Border x:Name="ThumbBd" Background="#282828" CornerRadius="4" Margin="1,2"/>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter TargetName="ThumbBd" Property="Background" Value="#484848"/>
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Thumb.Template>
+                                    </Thumb>
+                                </Track.Thumb>
+                            </Track>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="SidebarNavButton" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#D4D4D8"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
+            <Setter Property="FontSize" Value="13.5"/>
+            <Setter Property="FontWeight" Value="Normal"/>
+            <Setter Property="Height" Value="40"/>
+            <Setter Property="Padding" Value="12,0"/>
+            <Setter Property="HorizontalContentAlignment" Value="Left"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Margin" Value="0,1"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="10" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#1F1F1F"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="MiniNavButton" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#D4D4D8"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
+            <Setter Property="FontSize" Value="10"/>
+            <Setter Property="Height" Value="58"/>
+            <Setter Property="Padding" Value="4,6"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Margin" Value="0,2"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="10" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#1F1F1F"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="PillChipButton" TargetType="Button">
+            <Setter Property="Background" Value="#1FFFFFFF"/>
+            <Setter Property="Foreground" Value="#F1F1F1"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
+            <Setter Property="FontSize" Value="12.5"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Padding" Value="14,6"/>
+            <Setter Property="Margin" Value="0,0,8,0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="16" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#30FFFFFF"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="WhitePillButton" TargetType="Button">
+            <Setter Property="Background" Value="#F1F1F1"/>
+            <Setter Property="Foreground" Value="#0F0F0F"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Padding" Value="16,8"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="18" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#D9D9D9"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="ChannelTabButton" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#AAAAAA"/>
+            <Setter Property="FontFamily" Value="Segoe UI"/>
+            <Setter Property="FontSize" Value="13.5"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Padding" Value="16,8"/>
+            <Setter Property="Margin" Value="0,0,6,0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="BorderThickness" Value="0,0,0,2"/>
+            <Setter Property="BorderBrush" Value="Transparent"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Foreground" Value="#F1F1F1"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Grid.Resources>
+
+    <Grid.ColumnDefinitions>
+        <ColumnDefinition x:Name="SidebarColumn" Width="216"/>
+        <ColumnDefinition Width="*"/>
+    </Grid.ColumnDefinitions>
+
+    <!-- EXPANDED YOUTUBE SIDEBAR (216px, Ícones Vetoriais SVG) -->
+    <Border x:Name="SidebarPanel" Grid.Column="0" Background="#0F0F0F" Padding="10,8,10,12">
+        <StackPanel>
+            <Button x:Name="NavHome" Style="{StaticResource SidebarNavButton}">
+                <StackPanel Orientation="Horizontal">
+                    <Path Data="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="18" Height="18" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                    <TextBlock Text="Início" VerticalAlignment="Center"/>
+                </StackPanel>
+            </Button>
+            <Button x:Name="NavSubscriptions" Style="{StaticResource SidebarNavButton}">
+                <StackPanel Orientation="Horizontal">
+                    <Path Data="M20 8H4V6h16v2zm-2-6H6v2h12V2zm4 10v8c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2v-8c0-1.1.9-2 2-2h16c1.1 0 2 .9 2 2zm-6 4l-6-3.27v6.53L16 16z" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="18" Height="18" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                    <TextBlock Text="Inscrições" VerticalAlignment="Center"/>
+                </StackPanel>
+            </Button>
+            <Button x:Name="NavHistory" Style="{StaticResource SidebarNavButton}">
+                <StackPanel Orientation="Horizontal">
+                    <Path Data="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="18" Height="18" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                    <TextBlock Text="Histórico" VerticalAlignment="Center"/>
+                </StackPanel>
+            </Button>
+            <Button x:Name="NavPlaylists" Style="{StaticResource SidebarNavButton}">
+                <StackPanel Orientation="Horizontal">
+                    <Path Data="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-8 12.5v-9l6 4.5-6 4.5z" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="18" Height="18" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                    <TextBlock Text="Playlists" VerticalAlignment="Center"/>
+                </StackPanel>
+            </Button>
+            <Button x:Name="NavYou" Style="{StaticResource SidebarNavButton}">
+                <StackPanel Orientation="Horizontal">
+                    <Path Data="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="18" Height="18" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                    <TextBlock x:Name="TxtNavYouLabel" Text="Você" VerticalAlignment="Center"/>
+                </StackPanel>
+            </Button>
+
+            <Border Height="1" Background="#222222" Margin="8,10"/>
+
+            <Button x:Name="NavBackToPlayer" Style="{StaticResource SidebarNavButton}" Visibility="Collapsed">
+                <StackPanel Orientation="Horizontal">
+                    <Path Data="M8 5v14l11-7z" Fill="#FF0033" Width="16" Height="16" Stretch="Uniform" VerticalAlignment="Center" Margin="1,0,17,0"/>
+                    <TextBlock Text="Assistindo" VerticalAlignment="Center"/>
+                </StackPanel>
+            </Button>
+            <Button x:Name="NavOpenUrl" Style="{StaticResource SidebarNavButton}">
+                <StackPanel Orientation="Horizontal">
+                    <Path Data="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="18" Height="18" Stretch="Uniform" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                    <TextBlock Text="Abrir Link" VerticalAlignment="Center"/>
+                </StackPanel>
+            </Button>
+        </StackPanel>
+    </Border>
+
+    <!-- MINI YOUTUBE SIDEBAR RAIL (72px) -->
+    <Border x:Name="MiniSidebarPanel" Grid.Column="0" Background="#0F0F0F" Padding="4,8,4,12" Visibility="Collapsed">
+        <StackPanel>
+            <Button x:Name="MiniNavHome" Style="{StaticResource MiniNavButton}">
+                <StackPanel HorizontalAlignment="Center">
+                    <Path Data="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="20" Height="20" Stretch="Uniform" HorizontalAlignment="Center"/>
+                    <TextBlock Text="Início" FontSize="10" HorizontalAlignment="Center" Margin="0,4,0,0"/>
+                </StackPanel>
+            </Button>
+            <Button x:Name="MiniNavSubs" Style="{StaticResource MiniNavButton}">
+                <StackPanel HorizontalAlignment="Center">
+                    <Path Data="M20 8H4V6h16v2zm-2-6H6v2h12V2zm4 10v8c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2v-8c0-1.1.9-2 2-2h16c1.1 0 2 .9 2 2zm-6 4l-6-3.27v6.53L16 16z" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="20" Height="20" Stretch="Uniform" HorizontalAlignment="Center"/>
+                    <TextBlock Text="Inscrições" FontSize="9.5" HorizontalAlignment="Center" Margin="0,4,0,0"/>
+                </StackPanel>
+            </Button>
+            <Button x:Name="MiniNavHistory" Style="{StaticResource MiniNavButton}">
+                <StackPanel HorizontalAlignment="Center">
+                    <Path Data="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="20" Height="20" Stretch="Uniform" HorizontalAlignment="Center"/>
+                    <TextBlock Text="Histórico" FontSize="10" HorizontalAlignment="Center" Margin="0,4,0,0"/>
+                </StackPanel>
+            </Button>
+            <Button x:Name="MiniNavPlaylists" Style="{StaticResource MiniNavButton}">
+                <StackPanel HorizontalAlignment="Center">
+                    <Path Data="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-8 12.5v-9l6 4.5-6 4.5z" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="20" Height="20" Stretch="Uniform" HorizontalAlignment="Center"/>
+                    <TextBlock Text="Playlists" FontSize="10" HorizontalAlignment="Center" Margin="0,4,0,0"/>
+                </StackPanel>
+            </Button>
+            <Button x:Name="MiniNavYou" Style="{StaticResource MiniNavButton}">
+                <StackPanel HorizontalAlignment="Center">
+                    <Path Data="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z" Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Width="20" Height="20" Stretch="Uniform" HorizontalAlignment="Center"/>
+                    <TextBlock Text="Você" FontSize="10" HorizontalAlignment="Center" Margin="0,4,0,0"/>
+                </StackPanel>
+            </Button>
+            <Button x:Name="MiniNavWatch" Style="{StaticResource MiniNavButton}" Visibility="Collapsed">
+                <StackPanel HorizontalAlignment="Center">
+                    <Path Data="M8 5v14l11-7z" Fill="#FF0033" Width="18" Height="18" Stretch="Uniform" HorizontalAlignment="Center"/>
+                    <TextBlock Text="Assistindo" FontSize="9.5" HorizontalAlignment="Center" Margin="0,4,0,0"/>
+                </StackPanel>
+            </Button>
+        </StackPanel>
+    </Border>
+
+    <!-- MAIN CONTENT AREA -->
+    <Grid Grid.Column="1" Background="#0F0F0F">
+        <!-- VIEW 1: CATALOG / SEARCH / CHANNEL / PLAYLISTS -->
+        <Grid x:Name="CatalogViewGrid" Visibility="Visible">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+
+            <!-- Channel Banner (Visible only in Channel View) -->
+            <Border x:Name="ChannelBannerPanel" Grid.Row="0" Background="#161616" CornerRadius="12" Margin="18,8,18,8" Padding="18,14" Visibility="Collapsed">
+                <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+
+                        <Button x:Name="BtnBackFromChannel" Grid.Column="0" Content="← Voltar" Style="{StaticResource PillChipButton}" VerticalAlignment="Center" Margin="0,0,14,0"/>
+                        <Ellipse x:Name="ChannelAvatarEllipse" Grid.Column="1" Width="54" Height="54" Fill="#2A2A2A" Margin="0,0,14,0"/>
+                        <StackPanel Grid.Column="2" VerticalAlignment="Center">
+                            <TextBlock x:Name="LblChannelTitle" Text="Canal" FontSize="20" FontWeight="Bold" Foreground="#F1F1F1" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock x:Name="LblChannelSub" Text="" FontSize="12.5" Foreground="#AAAAAA" Margin="0,2,0,0"/>
+                        </StackPanel>
+                        <Button x:Name="BtnImportOpenedPlaylist" Grid.Column="3" Content="Salvar Playlist" Style="{StaticResource PillChipButton}" VerticalAlignment="Center" Visibility="Collapsed"/>
+                    </Grid>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                        <Button x:Name="BtnChannelTabHome" Content="Início" Style="{StaticResource ChannelTabButton}"/>
+                        <Button x:Name="BtnChannelTabVideos" Content="Vídeos" Style="{StaticResource ChannelTabButton}"/>
+                        <Button x:Name="BtnChannelTabPlaylists" Content="Playlists" Style="{StaticResource ChannelTabButton}"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Search & Preference Filter Chips -->
+            <WrapPanel x:Name="SearchChipsBar" Grid.Row="1" Margin="20,6,20,4" Visibility="Collapsed">
+                <Button x:Name="ChipAll" Content="Tudo" Style="{StaticResource PillChipButton}"/>
+                <Button x:Name="ChipVideos" Content="Vídeos" Style="{StaticResource PillChipButton}"/>
+                <Button x:Name="ChipChannels" Content="Canais" Style="{StaticResource PillChipButton}"/>
+                <Button x:Name="ChipHideShorts" Content="Sem Shorts" Style="{StaticResource PillChipButton}"/>
+                <Button x:Name="ChipSponsorBlock" Content="SponsorBlock: ON" Style="{StaticResource PillChipButton}"/>
+            </WrapPanel>
+
+            <!-- Catalog Section Header + Account Playlist Action Bar -->
+            <Grid Grid.Row="2" Margin="20,8,20,6">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <Button x:Name="BtnBackToAccountPlaylists" Grid.Column="0" Content="← Voltar para Playlists"
+                        Style="{StaticResource PillChipButton}" Margin="0,0,12,0" Visibility="Collapsed"/>
+
+                <TextBlock x:Name="LblCatalogHeader" Grid.Column="1" Text="Início • Vídeos recomendados"
+                           FontSize="15.5" FontWeight="SemiBold" Foreground="#F1F1F1" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+
+                <Button x:Name="BtnPlayOpenedPlaylist" Grid.Column="2" Content="▶  Reproduzir tudo"
+                        Style="{StaticResource WhitePillButton}" Padding="16,6" Visibility="Collapsed"/>
+            </Grid>
+
+            <!-- Virtualized WPF Catalog Grid (Direct, zero ElementHost) -->
+            <ContentControl x:Name="CatalogGridHost" Grid.Row="3" Margin="6,0,6,0"/>
+        </Grid>
+
+        <!-- VIEW 2: WATCH PAGE (YOUTUBE CINEMA STAGE + 4-COLUMN RECOMMENDED) -->
+        <ScrollViewer x:Name="WatchPageScroll" Visibility="Collapsed"
+                      VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                      Background="#0F0F0F">
+            <ScrollViewer.Resources>
+                <Style TargetType="ScrollBar" BasedOn="{StaticResource DarkThinScrollBar}"/>
+            </ScrollViewer.Resources>
+
+            <Grid x:Name="WatchContentRoot" MaxWidth="1400" Margin="24,10,24,28">
+                <StackPanel x:Name="WatchStageStack">
+                    <!-- 16:9 Video Player Stage -->
+                    <Border x:Name="PlayerStageFrame" Background="#000000" CornerRadius="12" ClipToBounds="True" Height="560">
+                        <Grid x:Name="PlayerHostContainer"/>
+                    </Border>
+
+                    <!-- Video Metadata Header (Clean YouTube Layout: No likes/comments/subscribe) -->
+                    <StackPanel x:Name="WatchMetadataPanel" Margin="2,14,2,10">
+                        <!-- Row 1: Title + Views/Date -->
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+
+                            <TextBlock x:Name="LblVideoTitle" Grid.Column="0" Text=""
+                                       FontSize="19" FontWeight="Bold" Foreground="#F1F1F1"
+                                       TextWrapping="Wrap" MaxHeight="56" TextTrimming="CharacterEllipsis" Margin="0,0,16,0"/>
+
+                            <TextBlock x:Name="LblVideoViewsDate" Grid.Column="1" Text=""
+                                       FontSize="13" Foreground="#AAAAAA" VerticalAlignment="Top" Margin="0,4,0,0"/>
+                        </Grid>
+
+                        <!-- Row 2: Channel Avatar + Name/Subs + Acessar Canal + Descrição Pill -->
+                        <Grid Margin="0,12,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+
+                            <Ellipse x:Name="WatchChannelAvatar" Grid.Column="0" Width="38" Height="38" Fill="#2A2A2A" Cursor="Hand" Margin="0,0,12,0"/>
+
+                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,16,0">
+                                <TextBlock x:Name="LblVideoChannel" Text="Canal" FontSize="14.5" FontWeight="Bold" Foreground="#F1F1F1" Cursor="Hand"/>
+                                <TextBlock x:Name="LblVideoSubInfo" Text="" FontSize="12" Foreground="#AAAAAA" Margin="0,1,0,0"/>
+                            </StackPanel>
+
+                            <Button x:Name="BtnOpenCurrentChannel" Grid.Column="2" Content="Acessar Canal" Style="{StaticResource WhitePillButton}" VerticalAlignment="Center"/>
+
+                            <Button x:Name="BtnToggleDescription" Grid.Column="4" Content="Descrição" Style="{StaticResource PillChipButton}" Margin="0" VerticalAlignment="Center"/>
+                        </Grid>
+
+                        <!-- Expandable Description Box with Clickable Timestamps -->
+                        <Border x:Name="DescriptionContainer" Background="#1F1F1F" CornerRadius="12" Padding="14,12" Margin="0,12,0,0" Visibility="Collapsed">
+                            <TextBlock x:Name="TxtVideoDescription" Foreground="#E4E4E7" FontSize="13" LineHeight="20" TextWrapping="Wrap"/>
+                        </Border>
+                    </StackPanel>
+
+                    <!-- Recommended Videos 4-Column Grid -->
+                    <ContentControl x:Name="RelatedGridHost" Margin="-6,10,-6,0"/>
+                </StackPanel>
+            </Grid>
+        </ScrollViewer>
+
+        <!-- FULLSCREEN VIDEO CONTAINER (100% viewport when Fullscreen is active) -->
+        <Grid x:Name="FullscreenHostLayer" Background="#000000" Visibility="Collapsed"/>
+    </Grid>
+</Grid>

@@ -129,7 +129,9 @@ namespace LiteTube
                         Logger.Info("PREWARM", string.Format("⚡ yt-dlp ({0}) pré-aquecido no Standby Cache em {1}ms.", ver, sw.ElapsedMilliseconds));
 
                         // Dispara verificação silenciosa de atualização em background (1x a cada 24h)
+                        // e pré-aquece VisitorData do InnerTube para evitar roundtrip extra no 1º vídeo
                         var _ = EnsureUpdatedInBackgroundAsync(force: false);
+                        var __ = ProgressiveVideoSession.PrewarmVisitorDataAsync();
                     }
                     else
                     {
@@ -148,19 +150,19 @@ namespace LiteTube
         /// Verifica e aplica atualizações do yt-dlp (-U) de forma silenciosa em background
         /// para garantir resiliência contínua contra mudanças de assinatura do YouTube.
         /// </summary>
-        public static Task EnsureUpdatedInBackgroundAsync(bool force = false)
+        public static Task<string> EnsureUpdatedInBackgroundAsync(bool force = false)
         {
-            if (_isUpdating) return Task.CompletedTask;
+            if (_isUpdating) return Task.FromResult("Atualização já está em andamento.");
 
             return Task.Run(() =>
             {
-                if (_isUpdating) return;
+                if (_isUpdating) return "Atualização já está em andamento.";
                 _isUpdating = true;
 
                 try
                 {
                     string path = GetYtDlpBinaryPath();
-                    if (!File.Exists(path)) return;
+                    if (!File.Exists(path)) return "yt-dlp.exe não encontrado.";
 
                     string dir = GetYtDlpDirectory();
                     string markerFile = Path.Combine(dir, "yt-dlp.lastupdate");
@@ -170,7 +172,7 @@ namespace LiteTube
                         DateTime lastCheck = File.GetLastWriteTimeUtc(markerFile);
                         if ((DateTime.UtcNow - lastCheck).TotalHours < 24.0)
                         {
-                            return;
+                            return "Verificado recentemente.";
                         }
                     }
 
@@ -199,19 +201,23 @@ namespace LiteTube
                     if (finished)
                     {
                         string output = proc.StandardOutput.ReadToEnd().Trim();
-                        if (!string.IsNullOrEmpty(output))
+                        string clean = output.Replace("\r", "").Replace("\n", " | ");
+                        if (!string.IsNullOrEmpty(clean))
                         {
-                            Logger.Info("YTDLP", "Auto-update yt-dlp: " + output.Replace("\r", "").Replace("\n", " | "));
+                            Logger.Info("YTDLP", "Auto-update yt-dlp: " + clean);
                         }
+                        return string.IsNullOrEmpty(clean) ? "yt-dlp verificado com sucesso." : clean;
                     }
                     else
                     {
                         try { proc.Kill(); } catch { }
+                        return "Tempo esgotado ao verificar atualização do yt-dlp.";
                     }
                 }
                 catch (Exception ex)
                 {
                     Logger.Warn("YTDLP", "Falha silenciosa no auto-update do yt-dlp: " + ex.Message);
+                    return "Erro ao atualizar: " + ex.Message;
                 }
                 finally
                 {

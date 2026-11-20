@@ -372,6 +372,8 @@ namespace LiteTube
 
         private void OnBarMouseWheel(object sender, MouseWheelEventArgs e)
         {
+            if (_rootContent == null || !_rootContent.IsMouseOver) return;
+
             double delta = e.Delta > 0 ? 0.02 : -0.02;
             double next = Math.Max(0.0, Math.Min(1.0, Math.Round(_volume0To1 + delta, 2)));
             if (VolumeChanged != null) VolumeChanged(next);
@@ -466,39 +468,6 @@ namespace LiteTube
                 }
             }
             catch { }
-        }
-
-        public void UpdateThumbnailFromGdiImage(System.Drawing.Image gdiImg)
-        {
-            if (_thumbImageRect == null || _thumbImageBrush == null) return;
-            if (gdiImg == null)
-            {
-                _thumbImageRect.Visibility = Visibility.Collapsed;
-                return;
-            }
-
-            try
-            {
-                using (var ms = new MemoryStream())
-                {
-                    gdiImg.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
-                    ms.Position = 0;
-                    var bmp = new BitmapImage();
-                    bmp.BeginInit();
-                    bmp.CacheOption = BitmapCacheOption.OnLoad;
-                    bmp.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
-                    bmp.StreamSource = ms;
-                    bmp.DecodePixelWidth = 120;
-                    bmp.EndInit();
-                    bmp.Freeze();
-                    _thumbImageBrush.ImageSource = bmp;
-                    _thumbImageRect.Visibility = Visibility.Visible;
-                }
-            }
-            catch
-            {
-                _thumbImageRect.Visibility = Visibility.Collapsed;
-            }
         }
 
         public void UpdateFavoriteVisual(bool isFavorite)

@@ -1,11 +1,11 @@
 using System;
 using System.Collections.Generic;
-using System.Drawing;
 using System.Globalization;
 using System.Net;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading.Tasks;
+using System.Windows.Media;
 
 namespace LiteTube
 {
@@ -36,20 +36,20 @@ namespace LiteTube
                 switch ((Category ?? "").ToLowerInvariant())
                 {
                     case "sponsor":
-                        return Color.FromArgb(0, 214, 0); // #00D600 Verde (Patrocínios)
+                        return Color.FromRgb(0, 214, 0); // #00D600 Verde (Patrocínios)
                     case "intro":
-                        return Color.FromArgb(0, 160, 255); // #00A0FF Azul (Aberturas)
+                        return Color.FromRgb(0, 160, 255); // #00A0FF Azul (Aberturas)
                     case "outro":
-                        return Color.FromArgb(184, 0, 255); // #B800FF Roxo (Encerramentos)
+                        return Color.FromRgb(184, 0, 255); // #B800FF Roxo (Encerramentos)
                     case "selfpromo":
                     case "interaction":
-                        return Color.FromArgb(255, 216, 0); // #FFD800 Amarelo (Auto-promoção e inscrições)
+                        return Color.FromRgb(255, 216, 0); // #FFD800 Amarelo (Auto-promoção e inscrições)
                     case "preview":
-                        return Color.FromArgb(0, 160, 255); // #00A0FF
+                        return Color.FromRgb(0, 160, 255); // #00A0FF
                     case "music_offtopic":
-                        return Color.FromArgb(62, 166, 255); // #3EA6FF Azul/Cinza (Trecho não-musical)
+                        return Color.FromRgb(62, 166, 255); // #3EA6FF Azul/Cinza (Trecho não-musical)
                     default:
-                        return Color.FromArgb(0, 214, 0);
+                        return Color.FromRgb(0, 214, 0);
                 }
             }
         }
@@ -78,23 +78,27 @@ namespace LiteTube
         public const string VideoCategoriesJson = "[\"sponsor\",\"intro\",\"outro\",\"selfpromo\",\"interaction\"]";
         public const string MusicCategoriesJson = "[\"music_offtopic\"]";
 
+        private const int MaxCacheEntries = 120;
         private static readonly Dictionary<string, List<SponsorSegment>> _cache =
             new Dictionary<string, List<SponsorSegment>>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Queue<string> _cacheOrder = new Queue<string>();
         private static readonly object _cacheLock = new object();
-        private static readonly HttpClient _httpClient;
 
-        static SponsorBlockService()
+        private static void StoreCacheUnsafe(string cacheKey, List<SponsorSegment> segments)
         {
-            var handler = new HttpClientHandler
+            if (!_cache.ContainsKey(cacheKey))
             {
-                AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
-            };
-            _httpClient = new HttpClient(handler)
+                _cacheOrder.Enqueue(cacheKey);
+            }
+            _cache[cacheKey] = segments;
+            while (_cache.Count > MaxCacheEntries && _cacheOrder.Count > 0)
             {
-                Timeout = TimeSpan.FromSeconds(4.5)
-            };
-            _httpClient.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) LiteTube/2.0");
+                string oldest = _cacheOrder.Dequeue();
+                _cache.Remove(oldest);
+            }
         }
+        // Usa exclusivamente HttpPipeline.Client (com SocketsHttpHandler e UseProxy = false)
+        private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(4.5);
 
         public static Task<List<SponsorSegment>> GetSegmentsAsync(string videoId)
         {
@@ -132,14 +136,17 @@ namespace LiteTube
                 string url = string.Format("https://sponsor.ajay.app/api/skipSegments?videoID={0}&categories={1}",
                     Uri.EscapeDataString(videoId.Trim()), escapedCategories);
 
-                using (HttpResponseMessage resp = await _httpClient.GetAsync(url).ConfigureAwait(false))
+                using var cts = new System.Threading.CancellationTokenSource(RequestTimeout);
+                using var req = new HttpRequestMessage(HttpMethod.Get, url);
+                req.Headers.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) LiteTube/2.0");
+                using (HttpResponseMessage resp = await HttpPipeline.Client.SendAsync(req, HttpCompletionOption.ResponseContentRead, cts.Token).ConfigureAwait(false))
                 {
                     if (resp.StatusCode == HttpStatusCode.NotFound)
                     {
                         var empty = new List<SponsorSegment>();
                         lock (_cacheLock)
                         {
-                            _cache[cacheKey] = empty;
+                            StoreCacheUnsafe(cacheKey, empty);
                         }
                         Logger.Info("SPONSORBLOCK", string.Format("SponsorBlock: Nenhum segmento cadastrado para {0} (404)", videoId));
                         return empty;
@@ -156,7 +163,7 @@ namespace LiteTube
 
                     lock (_cacheLock)
                     {
-                        _cache[cacheKey] = segments;
+                        StoreCacheUnsafe(cacheKey, segments);
                     }
 
                     Logger.Info("SPONSORBLOCK", string.Format("SponsorBlock: {0} segmentos encontrados para {1}", segments.Count, videoId));

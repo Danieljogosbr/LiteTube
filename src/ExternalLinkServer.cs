@@ -1,428 +1,320 @@
 using System;
 using System.IO;
-using System.Net;
-using System.Net.Sockets;
+using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
-using System.Windows.Forms;
+using Microsoft.Win32;
 
 namespace LiteTube
 {
     /// <summary>
-    /// Servidor HTTP local ultra-leve em segundo plano escutando na porta 48125 (http://127.0.0.1:48125/).
-    /// Recebe comandos de reprodução de extensões do navegador, bookmarklets e scripts externos.
-    /// Utiliza HttpListener com fallback automático para TcpListener em ambientes onde o driver http.sys não estiver disponível.
+    /// Servidor IPC local via Named Pipes ("LiteTube_IPC_Pipe") sem abertura de portas TCP
+    /// e gerenciador do protocolo personalizado litetube:// no Registro do Windows (HKCU).
+    /// Recebe comandos de instâncias secundárias do LiteTube (PING / PLAY|url / litetube://...) e despacha para a janela principal.
     /// </summary>
     public class ExternalLinkServer : IDisposable
     {
-        private const string LISTENER_PREFIX = "http://127.0.0.1:48125/";
-        private const int SERVER_PORT = 48125;
-        private const int SW_RESTORE = 9;
+        public const string PipeName = "LiteTube_IPC_Pipe";
+        public const string ProtocolScheme = "litetube";
 
-        [DllImport("user32.dll")]
-        private static extern bool SetForegroundWindow(IntPtr hWnd);
+        private static readonly Regex VideoIdOnlyRegex = new Regex("^[a-zA-Z0-9_-]{11}$", RegexOptions.Compiled);
 
-        [DllImport("user32.dll")]
-        private static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+        private readonly Action<string> _onPlayExternalUrl;
+        private readonly Action _onRestoreWindow;
+        private CancellationTokenSource _cts;
+        private Task _listenTask;
+        private volatile bool _isRunning;
 
-        private readonly MainForm _mainForm;
-        private HttpListener _httpListener;
-        private TcpListener _tcpListener;
-        private volatile bool _isRunning = false;
+        public bool IsRunning => _isRunning;
 
-        public bool IsRunning
+        public ExternalLinkServer(Action<string> onPlayExternalUrl, Action onRestoreWindow)
         {
-            get
-            {
-                return _isRunning &&
-                    ((_httpListener != null && _httpListener.IsListening) ||
-                     (_tcpListener != null && _tcpListener.Server != null && _tcpListener.Server.IsBound));
-            }
+            _onPlayExternalUrl = onPlayExternalUrl;
+            _onRestoreWindow = onRestoreWindow;
         }
 
-        public ExternalLinkServer(MainForm mainForm)
-        {
-            _mainForm = mainForm;
-        }
-
-        /// <summary>
-        /// Inicia o listener HTTP em segundo plano sem bloquear a thread de interface.
-        /// Tenta primariamente HttpListener e, caso o sistema não suporte http.sys ou ocorra erro,
-        /// realiza fallback transparente para TcpListener na porta 48125.
-        /// </summary>
         public void Start()
         {
             if (_isRunning) return;
-            _isRunning = true;
 
-            Task.Run(() =>
+            _cts = new CancellationTokenSource();
+            _isRunning = true;
+            _listenTask = Task.Run(() => ListenLoopAsync(_cts.Token));
+            Logger.Info("SERVER", "ExternalLinkServer ativo via NamedPipeServerStream (" + PipeName + ")");
+        }
+
+        private async Task ListenLoopAsync(CancellationToken token)
+        {
+            while (!token.IsCancellationRequested && _isRunning)
             {
-                // 1. Tentativa Primária: HttpListener nativo
-                bool httpSysOk = false;
+                NamedPipeServerStream server = null;
                 try
                 {
-                    if (HttpListener.IsSupported)
-                    {
-                        _httpListener = new HttpListener();
-                        _httpListener.Prefixes.Add(LISTENER_PREFIX);
-                        _httpListener.Start();
-                        httpSysOk = true;
-                        Logger.Info("SERVER", "🌐 ExternalLinkServer ativo via HttpListener em " + LISTENER_PREFIX);
+                    server = new NamedPipeServerStream(
+                        PipeName,
+                        PipeDirection.InOut,
+                        NamedPipeServerStream.MaxAllowedServerInstances,
+                        PipeTransmissionMode.Byte,
+                        PipeOptions.Asynchronous);
 
-                        while (_isRunning && _httpListener != null && _httpListener.IsListening)
-                        {
-                            try
-                            {
-                                var context = _httpListener.GetContext();
-                                Task.Run(() => HandleHttpContext(context));
-                            }
-                            catch (HttpListenerException)
-                            {
-                                break;
-                            }
-                            catch (ObjectDisposedException)
-                            {
-                                break;
-                            }
-                            catch (Exception ex)
-                            {
-                                if (!_isRunning) break;
-                                Logger.Warn("SERVER", "Erro ao receber requisição HttpListener: " + ex.Message);
-                            }
-                        }
-                        return;
-                    }
+                    await server.WaitForConnectionAsync(token).ConfigureAwait(false);
+                    _ = HandleClientAsync(server, token);
                 }
-                catch (HttpListenerException ex)
+                catch (OperationCanceledException)
                 {
-                    Logger.Warn("SERVER", "HttpListener indisponível ou porta restrita (" + ex.Message + "). Ativando fallback TcpListener...");
+                    try { server?.Dispose(); } catch { }
+                    break;
                 }
                 catch (Exception ex)
                 {
-                    Logger.Warn("SERVER", "HttpListener falhou (" + ex.Message + "). Ativando fallback TcpListener...");
-                }
-
-                // 2. Fallback Transparente: TcpListener HTTP Server (independente de http.sys)
-                if (!httpSysOk && _isRunning)
-                {
-                    try
+                    try { server?.Dispose(); } catch { }
+                    Logger.Warn("SERVER", "Erro no loop NamedPipeServerStream: " + ex.Message);
+                    if (!token.IsCancellationRequested)
                     {
-                        _tcpListener = new TcpListener(IPAddress.Loopback, SERVER_PORT);
-                        _tcpListener.Start();
-                        Logger.Info("SERVER", string.Format("🌐 ExternalLinkServer ativo via TcpListener em http://127.0.0.1:{0}/", SERVER_PORT));
-
-                        while (_isRunning && _tcpListener != null)
-                        {
-                            try
-                            {
-                                var client = _tcpListener.AcceptTcpClient();
-                                Task.Run(() => HandleTcpClient(client));
-                            }
-                            catch (SocketException)
-                            {
-                                break;
-                            }
-                            catch (ObjectDisposedException)
-                            {
-                                break;
-                            }
-                            catch (Exception ex)
-                            {
-                                if (!_isRunning) break;
-                                Logger.Warn("SERVER", "Erro ao aceitar conexão TcpListener: " + ex.Message);
-                            }
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        _isRunning = false;
-                        Logger.Warn("SERVER", "Falha ao iniciar ExternalLinkServer via TcpListener: " + ex.Message);
+                        try { await Task.Delay(150, token).ConfigureAwait(false); } catch { break; }
                     }
                 }
-            });
+            }
         }
 
-        #region HttpListener Request Handler
-        private void HandleHttpContext(HttpListenerContext context)
+        private async Task HandleClientAsync(NamedPipeServerStream server, CancellationToken token)
         {
             try
             {
-                var request = context.Request;
-                var response = context.Response;
-
-                // Cabeçalhos CORS irrestritos para compatibilidade com extensões e bookmarklets
-                response.Headers["Access-Control-Allow-Origin"] = "*";
-                response.Headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS";
-                response.Headers["Access-Control-Allow-Headers"] = "*";
-
-                if (string.Equals(request.HttpMethod, "OPTIONS", StringComparison.OrdinalIgnoreCase))
+                using (server)
+                using (var reader = new StreamReader(server, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, bufferSize: 1024, leaveOpen: true))
+                using (var writer = new StreamWriter(server, new UTF8Encoding(false), bufferSize: 1024, leaveOpen: true) { AutoFlush = true })
                 {
-                    response.StatusCode = 200;
-                    response.ContentLength64 = 0;
-                    response.Close();
-                    return;
-                }
+                    string message = await reader.ReadLineAsync(token).ConfigureAwait(false);
+                    if (string.IsNullOrWhiteSpace(message)) return;
 
-                string rawPath = request.Url != null ? request.Url.AbsolutePath : "";
+                    string trimmed = message.Trim();
 
-                // Rota /ping
-                if (string.Equals(rawPath, "/ping", StringComparison.OrdinalIgnoreCase))
-                {
-                    byte[] pongBytes = Encoding.UTF8.GetBytes("pong");
-                    response.ContentType = "text/plain; charset=utf-8";
-                    response.StatusCode = 200;
-                    response.ContentLength64 = pongBytes.Length;
-                    response.OutputStream.Write(pongBytes, 0, pongBytes.Length);
-                    response.Close();
-                    return;
-                }
-
-                // Rota /play?url={encodedUrl}
-                if (string.Equals(rawPath, "/play", StringComparison.OrdinalIgnoreCase))
-                {
-                    string urlParam = request.QueryString["url"];
-
-                    // Fallback para corpo POST ou query string direta
-                    if (string.IsNullOrEmpty(urlParam) && request.HasEntityBody)
+                    if (string.Equals(trimmed, "PING", StringComparison.OrdinalIgnoreCase))
                     {
-                        using (var reader = new StreamReader(request.InputStream, request.ContentEncoding))
+                        await writer.WriteLineAsync("PONG").ConfigureAwait(false);
+                        return;
+                    }
+
+                    if (trimmed.StartsWith("PLAY|", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string rawPayload = trimmed.Substring(5).Trim();
+                        string normalizedUrl = NormalizeExternalUrl(rawPayload);
+                        if (!string.IsNullOrEmpty(normalizedUrl))
                         {
-                            string body = reader.ReadToEnd();
-                            urlParam = ExtractUrlFromQueryStringOrBody(body);
+                            Logger.Info("SERVER", "Comando IPC PLAY recebido para: " + normalizedUrl);
+                            await writer.WriteLineAsync("OK: Reproduzindo").ConfigureAwait(false);
+                            DispatchPlaybackToUi(normalizedUrl);
+                            return;
+                        }
+                    }
+                    else if (trimmed.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                             trimmed.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+                             trimmed.StartsWith(ProtocolScheme + ":", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string normalizedUrl = NormalizeExternalUrl(trimmed);
+                        if (!string.IsNullOrEmpty(normalizedUrl))
+                        {
+                            Logger.Info("SERVER", "URL IPC recebida diretamente para: " + normalizedUrl);
+                            await writer.WriteLineAsync("OK: Reproduzindo").ConfigureAwait(false);
+                            DispatchPlaybackToUi(normalizedUrl);
+                            return;
                         }
                     }
 
-                    if (string.IsNullOrEmpty(urlParam) && request.Url != null && !string.IsNullOrEmpty(request.Url.Query))
+                    await writer.WriteLineAsync("ERR: Comando invalido").ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                Logger.Warn("SERVER", "Erro ao processar mensagem NamedPipe: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// Registra o protocolo personalizado litetube:// em HKCU\Software\Classes\litetube
+        /// sem exigir privilégios administrativos ou abertura de portas TCP.
+        /// </summary>
+        public static void EnsureProtocolRegistered()
+        {
+            try
+            {
+                string exePath = Environment.ProcessPath;
+                if (string.IsNullOrWhiteSpace(exePath) ||
+                    !exePath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
+                    !File.Exists(exePath))
+                {
+                    return;
+                }
+
+                string expectedCommand = "\"" + exePath + "\" \"%1\"";
+                string expectedIcon = "\"" + exePath + "\",0";
+                string rootSubKey = @"Software\Classes\" + ProtocolScheme;
+
+                using (var existingCmd = Registry.CurrentUser.OpenSubKey(rootSubKey + @"\shell\open\command", writable: false))
+                {
+                    string currentCmd = existingCmd?.GetValue(null) as string;
+                    if (string.Equals(currentCmd, expectedCommand, StringComparison.OrdinalIgnoreCase))
                     {
-                        urlParam = ExtractUrlFromQueryStringOrBody(request.Url.Query);
+                        return;
+                    }
+                }
+
+                using (var key = Registry.CurrentUser.CreateSubKey(rootSubKey, writable: true))
+                {
+                    if (key == null) return;
+                    key.SetValue(null, "URL:LiteTube Protocol");
+                    key.SetValue("URL Protocol", string.Empty);
+
+                    using (var iconKey = key.CreateSubKey("DefaultIcon", writable: true))
+                    {
+                        iconKey?.SetValue(null, expectedIcon);
                     }
 
-                    if (!string.IsNullOrEmpty(urlParam))
+                    using (var cmdKey = key.CreateSubKey(@"shell\open\command", writable: true))
                     {
-                        string decodedUrl = Uri.UnescapeDataString(urlParam).Trim();
-                        Logger.Info("SERVER", "📥 Comando /play recebido para: " + decodedUrl);
+                        cmdKey?.SetValue(null, expectedCommand);
+                    }
+                }
 
-                        byte[] okBytes = Encoding.UTF8.GetBytes("OK: Reproduzindo");
-                        response.ContentType = "text/plain; charset=utf-8";
-                        response.StatusCode = 200;
-                        response.ContentLength64 = okBytes.Length;
-                        response.OutputStream.Write(okBytes, 0, okBytes.Length);
-                        response.Close();
+                Logger.Info("PROTOCOL", "Protocolo " + ProtocolScheme + ":// registrado em HKCU para: " + exePath);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn("PROTOCOL", "Não foi possível registrar protocolo " + ProtocolScheme + ":// no Registro: " + ex.Message);
+            }
+        }
 
-                        DispatchPlaybackToUi(decodedUrl);
-                        return;
+        /// <summary>
+        /// Converte argumentos externos (litetube://play?url=..., litetube://https://..., URL direta ou Video ID)
+        /// para uma URL HTTP/HTTPS reproduzível ou ID de vídeo de 11 caracteres.
+        /// </summary>
+        public static string NormalizeExternalUrl(string rawInput)
+        {
+            if (string.IsNullOrWhiteSpace(rawInput)) return string.Empty;
+
+            string candidate = rawInput.Trim().Trim('"');
+
+            if (candidate.StartsWith(ProtocolScheme + ":", StringComparison.OrdinalIgnoreCase))
+            {
+                string rest = candidate.Substring(ProtocolScheme.Length + 1);
+                if (rest.StartsWith("//", StringComparison.Ordinal))
+                {
+                    rest = rest.Substring(2);
+                }
+
+                // Procura parametro ?url= ou &url= preservando case dos IDs de vídeo
+                int qIdx = rest.IndexOf('?');
+                if (qIdx >= 0)
+                {
+                    string queryPart = rest.Substring(qIdx + 1);
+                    int urlParamIdx = queryPart.IndexOf("url=", StringComparison.OrdinalIgnoreCase);
+                    if (urlParamIdx >= 0)
+                    {
+                        string encodedTarget = queryPart.Substring(urlParamIdx + 4);
+                        candidate = Uri.UnescapeDataString(encodedTarget).Trim();
                     }
                     else
                     {
-                        byte[] errBytes = Encoding.UTF8.GetBytes("Erro: Parâmetro 'url' ausente");
-                        response.ContentType = "text/plain; charset=utf-8";
-                        response.StatusCode = 400;
-                        response.ContentLength64 = errBytes.Length;
-                        response.OutputStream.Write(errBytes, 0, errBytes.Length);
-                        response.Close();
-                        return;
+                        candidate = Uri.UnescapeDataString(rest).Trim();
                     }
                 }
-
-                response.StatusCode = 404;
-                response.Close();
-            }
-            catch (Exception ex)
-            {
-                Logger.Warn("SERVER", "Erro ao processar requisição HttpListener: " + ex.Message);
-            }
-        }
-        #endregion
-
-        #region TcpListener HTTP Request Handler (Fallback Engine)
-        private void HandleTcpClient(TcpClient client)
-        {
-            try
-            {
-                using (client)
-                using (var stream = client.GetStream())
+                else
                 {
-                    var reader = new StreamReader(stream, Encoding.UTF8);
-                    string requestLine = reader.ReadLine();
-                    if (string.IsNullOrEmpty(requestLine)) return;
-
-                    string[] parts = requestLine.Split(' ');
-                    if (parts.Length < 2) return;
-
-                    string method = parts[0].ToUpperInvariant();
-                    string rawUrl = parts[1];
-
-                    // Lê cabeçalhos HTTP
-                    int contentLength = 0;
-                    string line;
-                    while (!string.IsNullOrEmpty(line = reader.ReadLine()))
+                    if (rest.StartsWith("play/", StringComparison.OrdinalIgnoreCase))
                     {
-                        if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
-                        {
-                            int.TryParse(line.Substring(15).Trim(), out contentLength);
-                        }
+                        rest = rest.Substring(5);
                     }
-
-                    // Lê corpo se houver
-                    string body = "";
-                    if (contentLength > 0)
-                    {
-                        char[] buf = new char[contentLength];
-                        int readTotal = 0;
-                        while (readTotal < contentLength)
-                        {
-                            int r = reader.Read(buf, readTotal, contentLength - readTotal);
-                            if (r <= 0) break;
-                            readTotal += r;
-                        }
-                        body = new string(buf, 0, readTotal);
-                    }
-
-                    // Preflight CORS
-                    if (method == "OPTIONS")
-                    {
-                        SendTcpHttpResponse(stream, 200, "OK", "text/plain", new byte[0]);
-                        return;
-                    }
-
-                    string path = rawUrl;
-                    int qIdx = rawUrl.IndexOf('?');
-                    string query = "";
-                    if (qIdx >= 0)
-                    {
-                        path = rawUrl.Substring(0, qIdx);
-                        query = rawUrl.Substring(qIdx);
-                    }
-
-                    // Rota /ping
-                    if (string.Equals(path, "/ping", StringComparison.OrdinalIgnoreCase))
-                    {
-                        byte[] pong = Encoding.UTF8.GetBytes("pong");
-                        SendTcpHttpResponse(stream, 200, "OK", "text/plain; charset=utf-8", pong);
-                        return;
-                    }
-
-                    // Rota /play
-                    if (string.Equals(path, "/play", StringComparison.OrdinalIgnoreCase))
-                    {
-                        string urlParam = ExtractUrlFromQueryStringOrBody(query);
-                        if (string.IsNullOrEmpty(urlParam) && !string.IsNullOrEmpty(body))
-                        {
-                            urlParam = ExtractUrlFromQueryStringOrBody(body);
-                        }
-
-                        if (!string.IsNullOrEmpty(urlParam))
-                        {
-                            string decodedUrl = Uri.UnescapeDataString(urlParam).Trim();
-                            Logger.Info("SERVER", "📥 Comando /play recebido via TcpListener para: " + decodedUrl);
-
-                            byte[] ok = Encoding.UTF8.GetBytes("OK: Reproduzindo");
-                            SendTcpHttpResponse(stream, 200, "OK", "text/plain; charset=utf-8", ok);
-
-                            DispatchPlaybackToUi(decodedUrl);
-                            return;
-                        }
-                        else
-                        {
-                            byte[] err = Encoding.UTF8.GetBytes("Erro: Parâmetro 'url' ausente");
-                            SendTcpHttpResponse(stream, 400, "Bad Request", "text/plain; charset=utf-8", err);
-                            return;
-                        }
-                    }
-
-                    SendTcpHttpResponse(stream, 404, "Not Found", "text/plain", new byte[0]);
+                    candidate = Uri.UnescapeDataString(rest).Trim();
                 }
-            }
-            catch (Exception ex)
-            {
-                Logger.Warn("SERVER", "Erro ao tratar requisição TcpListener: " + ex.Message);
-            }
-        }
 
-        private void SendTcpHttpResponse(NetworkStream stream, int statusCode, string statusMsg, string contentType, byte[] body)
-        {
-            try
-            {
-                string header = string.Format(
-                    "HTTP/1.1 {0} {1}\r\n" +
-                    "Access-Control-Allow-Origin: *\r\n" +
-                    "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n" +
-                    "Access-Control-Allow-Headers: *\r\n" +
-                    "Content-Type: {2}\r\n" +
-                    "Content-Length: {3}\r\n" +
-                    "Connection: close\r\n\r\n",
-                    statusCode, statusMsg, contentType, body != null ? body.Length : 0);
-
-                byte[] headerBytes = Encoding.UTF8.GetBytes(header);
-                stream.Write(headerBytes, 0, headerBytes.Length);
-                if (body != null && body.Length > 0)
+                if (!string.IsNullOrEmpty(candidate) &&
+                    !candidate.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+                    !candidate.StartsWith("https://", StringComparison.OrdinalIgnoreCase) &&
+                    !VideoIdOnlyRegex.IsMatch(candidate))
                 {
-                    stream.Write(body, 0, body.Length);
+                    candidate = "https://" + candidate.TrimStart('/');
                 }
-                stream.Flush();
             }
-            catch { }
+
+            if (candidate.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                candidate.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+                VideoIdOnlyRegex.IsMatch(candidate))
+            {
+                return candidate;
+            }
+
+            return string.Empty;
         }
-        #endregion
 
-        private static string ExtractUrlFromQueryStringOrBody(string input)
+        /// <summary>
+        /// Extrai o instante inicial em segundos (t=872s, t=1m30s, t=1h2m3s, start=120) de uma URL do YouTube.
+        /// </summary>
+        public static double ExtractStartSecondsFromUrl(string url)
         {
-            if (string.IsNullOrEmpty(input)) return null;
-            if (input.StartsWith("?")) input = input.Substring(1);
+            if (string.IsNullOrWhiteSpace(url)) return 0;
 
-            var m = Regex.Match(input, @"(?:^|&)url=([^&]+)");
-            if (m.Success)
+            var match = Regex.Match(url, @"[?&#](?:t|time_continue|start)=([0-9hmsHMS]+)", RegexOptions.IgnoreCase);
+            if (!match.Success) return 0;
+
+            string token = match.Groups[1].Value.Trim().ToLowerInvariant();
+            if (string.IsNullOrEmpty(token)) return 0;
+
+            if (double.TryParse(token.TrimEnd('s'), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double plainSec))
             {
-                return m.Groups[1].Value;
+                return plainSec > 0 ? plainSec : 0;
             }
 
-            if (input.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
-                input.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-            {
-                return input.Trim();
-            }
+            double total = 0;
+            var hMatch = Regex.Match(token, @"(\d+)h");
+            var mMatch = Regex.Match(token, @"(\d+)m");
+            var sMatch = Regex.Match(token, @"(\d+)s");
+            if (hMatch.Success && int.TryParse(hMatch.Groups[1].Value, out int h)) total += h * 3600;
+            if (mMatch.Success && int.TryParse(mMatch.Groups[1].Value, out int m)) total += m * 60;
+            if (sMatch.Success && int.TryParse(sMatch.Groups[1].Value, out int s)) total += s;
+            return total > 0 ? total : 0;
+        }
 
-            return null;
+        /// <summary>
+        /// Envia um comando síncrono para a instância ativa do LiteTube via NamedPipeClientStream.
+        /// </summary>
+        public static string SendCommand(string command, int timeoutMs = 1500)
+        {
+            if (string.IsNullOrWhiteSpace(command)) return string.Empty;
+
+            using var client = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+            client.Connect(timeoutMs);
+
+            using var writer = new StreamWriter(client, new UTF8Encoding(false), bufferSize: 1024, leaveOpen: true) { AutoFlush = true };
+            using var reader = new StreamReader(client, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, bufferSize: 1024, leaveOpen: true);
+
+            writer.WriteLine(command.Replace("\r", "").Replace("\n", "").Trim());
+            string response = reader.ReadLine();
+            return response ?? string.Empty;
         }
 
         private void DispatchPlaybackToUi(string decodedUrl)
         {
-            if (_mainForm != null && !_mainForm.IsDisposed)
+            try
             {
-                _mainForm.SafeInvoke(() =>
-                {
-                    RestoreAndFocusWindow();
-                    _mainForm.PlayExternalUrl(decodedUrl);
-                });
+                _onRestoreWindow?.Invoke();
+                _onPlayExternalUrl?.Invoke(decodedUrl);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn("SERVER", "Erro ao despachar link externo para UI: " + ex.Message);
             }
         }
 
-        /// <summary>
-        /// Restaura a janela do LiteTube caso esteja na bandeja do sistema ou minimizada, e coloca-a em primeiro plano.
-        /// </summary>
         public void RestoreAndFocusWindow()
         {
             try
             {
-                if (_mainForm == null || _mainForm.IsDisposed) return;
-
-                if (!_mainForm.Visible)
-                {
-                    _mainForm.Show();
-                }
-
-                if (_mainForm.WindowState == FormWindowState.Minimized)
-                {
-                    _mainForm.WindowState = FormWindowState.Normal;
-                }
-
-                ShowWindowAsync(_mainForm.Handle, SW_RESTORE);
-                SetForegroundWindow(_mainForm.Handle);
-
-                _mainForm.Activate();
-                _mainForm.BringToFront();
+                _onRestoreWindow?.Invoke();
             }
             catch (Exception ex)
             {
@@ -430,46 +322,21 @@ namespace LiteTube
             }
         }
 
-        /// <summary>
-        /// Encerra e descarta o listener HTTP liberando a porta 48125.
-        /// </summary>
         public void Stop()
         {
             _isRunning = false;
             try
             {
-                if (_httpListener != null)
-                {
-                    if (_httpListener.IsListening)
-                    {
-                        _httpListener.Stop();
-                    }
-                    _httpListener.Close();
-                }
+                _cts?.Cancel();
             }
             catch (Exception ex)
             {
-                Logger.Warn("SERVER", "Erro ao encerrar HttpListener: " + ex.Message);
+                Logger.Warn("SERVER", "Erro ao encerrar NamedPipeServerStream: " + ex.Message);
             }
             finally
             {
-                _httpListener = null;
-            }
-
-            try
-            {
-                if (_tcpListener != null)
-                {
-                    _tcpListener.Stop();
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Warn("SERVER", "Erro ao encerrar TcpListener: " + ex.Message);
-            }
-            finally
-            {
-                _tcpListener = null;
+                try { _cts?.Dispose(); } catch { }
+                _cts = null;
             }
         }
 

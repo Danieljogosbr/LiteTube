@@ -1,17 +1,18 @@
 using System;
 using System.Diagnostics;
 using System.IO;
-using System.Net;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Windows.Forms;
+using System.Windows;
 
 namespace LiteTube
 {
     internal static class Program
     {
         private static Mutex _singleInstanceMutex;
+        public static readonly Stopwatch StartupStopwatch = Stopwatch.StartNew();
+        public static Task EngineReadyTask { get; private set; } = Task.CompletedTask;
 
         [DllImport("shell32.dll", SetLastError = true)]
         private static extern int SetCurrentProcessExplicitAppUserModelID([MarshalAs(UnmanagedType.LPWStr)] string AppID);
@@ -38,12 +39,6 @@ namespace LiteTube
                     {
                         return typeof(Program).Assembly;
                     }
-                    string libPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "lib", asmName + ".dll");
-                    if (File.Exists(libPath))
-                    {
-                        try { return System.Reflection.Assembly.LoadFrom(libPath); }
-                        catch { return System.Reflection.Assembly.Load(File.ReadAllBytes(libPath)); }
-                    }
                     string rootPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, asmName + ".dll");
                     if (File.Exists(rootPath))
                     {
@@ -56,23 +51,16 @@ namespace LiteTube
             };
 
             Logger.Init();
-            Logger.Info("APP", "Iniciando LiteTube...");
+            Logger.Info("APP", "Iniciando LiteTube (Arquitetura 100% WPF Puro)...");
 
-            // Inicializa e destrava o pool de rede global (32 conexões simultâneas, TLS 1.2 / 1.3, sem Nagle)
+            int orphanCookiesCleaned = CookieVault.CleanupOrphanedTempCookieFiles();
+            if (orphanCookiesCleaned > 0)
+            {
+                Logger.Info("AUTH", string.Format("Removidos {0} arquivo(s) temporário(s) órfão(s) de cookies do %TEMP%.", orphanCookiesCleaned));
+            }
+
             App.InitializeNetworkPool();
-            if (System.Windows.Application.Current == null)
-            {
-                new App { ShutdownMode = System.Windows.ShutdownMode.OnExplicitShutdown };
-            }
 
-            string backupDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "backup", "pre_wpf_redesign");
-            if (Directory.Exists(backupDir))
-            {
-                Logger.Info("BACKUP", "Backup preventivo (backup/pre_wpf_redesign) verificado e confirmado com sucesso em: " + backupDir);
-            }
-
-            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
-            Application.ThreadException += (s, e) => HandleException(e.Exception, false);
             AppDomain.CurrentDomain.UnhandledException += (s, e) => HandleException(e.ExceptionObject as Exception, true);
             TaskScheduler.UnobservedTaskException += (s, e) =>
             {
@@ -80,30 +68,42 @@ namespace LiteTube
                 LogException(e.Exception);
             };
 
+            bool isSelfTest = false;
+            string[] checkArgs = Environment.GetCommandLineArgs();
+            for (int i = 1; i < checkArgs.Length; i++)
+            {
+                if (string.Equals(checkArgs[i], "--self-test", StringComparison.OrdinalIgnoreCase))
+                {
+                    isSelfTest = true;
+                    break;
+                }
+            }
+            _isSelfTestMode = isSelfTest;
+
+            string startupExternalUrl = FindExternalUrlArg(checkArgs);
+
             bool createdNew;
             _singleInstanceMutex = new Mutex(true, "LiteTube_SingleInstance_Mutex_v2", out createdNew);
-            if (!createdNew)
+            if (!createdNew && !isSelfTest)
             {
-                Logger.Warn("APP", "Instância duplicada detectada. Restaurando janela existente e repassando argumentos.");
+                if (!string.IsNullOrEmpty(startupExternalUrl))
+                {
+                    try
+                    {
+                        ExternalLinkServer.SendCommand("PLAY|" + startupExternalUrl, 2500);
+                    }
+                    catch { }
+                }
+
                 try
                 {
-                    string[] cliArgs = Environment.GetCommandLineArgs();
-                    if (cliArgs.Length > 1 && !string.IsNullOrWhiteSpace(cliArgs[1]) && !cliArgs[1].StartsWith("--"))
-                    {
-                        try
-                        {
-                            HttpPipeline.Client.GetStringAsync("http://127.0.0.1:48125/play?url=" + Uri.EscapeDataString(cliArgs[1].Trim())).GetAwaiter().GetResult();
-                        }
-                        catch { }
-                    }
-
                     Process current = Process.GetCurrentProcess();
-                    foreach (Process proc in Process.GetProcessesByName(current.ProcessName))
+                    foreach (Process p in Process.GetProcessesByName(current.ProcessName))
                     {
-                        if (proc.Id != current.Id && proc.MainWindowHandle != IntPtr.Zero)
+                        if (p.Id != current.Id && p.MainWindowHandle != IntPtr.Zero)
                         {
-                            ShowWindowAsync(proc.MainWindowHandle, SW_RESTORE);
-                            SetForegroundWindow(proc.MainWindowHandle);
+                            ShowWindowAsync(p.MainWindowHandle, SW_RESTORE);
+                            SetForegroundWindow(p.MainWindowHandle);
                             break;
                         }
                     }
@@ -112,82 +112,95 @@ namespace LiteTube
                 return;
             }
 
-            Application.EnableVisualStyles();
-            Application.SetCompatibleTextRenderingDefault(false);
-            MemoryOptimizer.TrimMemory();
+            ExternalLinkServer.EnsureProtocolRegistered();
 
-            try
+            // CRÍTICO: Instancia App (System.Windows.Application) ANTES de FlyleafLib.Engine.StartAsync,
+            // pois o motor FlyleafLib cria/acessa Application.Current internamente ao inicializar.
+            var app = (Application.Current as App) ?? new App();
+            app.ShutdownMode = ShutdownMode.OnMainWindowClose;
+            app.DispatcherUnhandledException += (s, e) =>
             {
-                string oldExe = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "LiteTube.old.exe");
-                if (File.Exists(oldExe)) File.Delete(oldExe);
-            }
-            catch { }
+                LogException(e.Exception);
+                e.Handled = true;
+            };
 
-            // Rotina de arranque: elimina pasta legada de miniaturas em disco (data/thumbs) migrada para 100% RAM
-            try
-            {
-                string legacyThumbsDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "thumbs");
-                if (Directory.Exists(legacyThumbsDir))
-                {
-                    Directory.Delete(legacyThumbsDir, true);
-                    Logger.Info("CLEANUP", "Pasta legada data/thumbs removida com sucesso. Miniaturas operando 100% em memória RAM.");
-                }
-            }
-            catch { }
+            EngineReadyTask = StartFlyleafEngineNonBlocking();
+            App.PrewarmBackgroundServices();
 
-            InitializeFlyleafEngine();
+            Logger.Info("APP", string.Format("Iniciando loop da interface WPF (WpfMainWindow em {0}ms)...",
+                StartupStopwatch.ElapsedMilliseconds));
 
-            Logger.Info("APP", "Iniciando loop da interface gráfica (MainForm)...");
-            var mainForm = new MainForm();
-            string[] args = Environment.GetCommandLineArgs();
-            for (int i = 1; i < args.Length; i++)
-            {
-                if (string.Equals(args[i], "--self-test", StringComparison.OrdinalIgnoreCase))
-                {
-                    mainForm.Shown += async (s, e) =>
-                    {
-                        await mainForm.RunSelfTestProtocolAsync();
-                    };
-                    break;
-                }
-            }
-            Application.Run(mainForm);
+            var mainWindow = new WpfMainWindow(isSelfTest, startupExternalUrl);
+            app.Run(mainWindow);
+
+            CookieVault.CleanupOrphanedTempCookieFiles();
             Logger.Info("APP", "LiteTube finalizado com sucesso.");
+            Logger.Flush();
             GC.KeepAlive(_singleInstanceMutex);
         }
 
-        private static void InitializeFlyleafEngine()
+        private static string FindExternalUrlArg(string[] args)
+        {
+            if (args == null || args.Length <= 1) return null;
+            for (int i = 1; i < args.Length; i++)
+            {
+                string arg = args[i];
+                if (!string.IsNullOrWhiteSpace(arg) && !arg.StartsWith("--", StringComparison.Ordinal))
+                {
+                    return arg.Trim();
+                }
+            }
+            return null;
+        }
+
+        private static Task StartFlyleafEngineNonBlocking()
         {
             try
             {
                 string ffmpegPath = FFmpegResolver.ResolveFFmpegDirectory();
                 string pluginsPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Plugins");
 
-                FlyleafLib.Engine.Start(new FlyleafLib.EngineConfig()
+                FlyleafLib.Engine.StartAsync(new FlyleafLib.EngineConfig()
                 {
-                    UIRefreshInterval = 30,
+                    UIRefresh = true,
+                    UIRefreshInterval = 50,
+                    UICurTimePerSecond = false,
                     PluginsPath = Directory.Exists(pluginsPath) ? pluginsPath : ffmpegPath,
                     FFmpegPath = ffmpegPath
                 });
-                Logger.Info("FLYLEAF", "Motor FlyleafLib / Direct3D 11 inicializado com sucesso apontando para: " + ffmpegPath);
+
+                return Task.Run(async () =>
+                {
+                    var swWait = Stopwatch.StartNew();
+                    while (!FlyleafLib.Engine.IsLoaded && swWait.ElapsedMilliseconds < 15000)
+                    {
+                        await Task.Delay(15).ConfigureAwait(false);
+                    }
+                    Logger.Info("FLYLEAF", string.Format("Motor FlyleafLib / Direct3D 11 inicializado em {0}ms (StartAsync em background | IsLoaded={1}) apontando para: {2}",
+                        StartupStopwatch.ElapsedMilliseconds, FlyleafLib.Engine.IsLoaded, ffmpegPath));
+                });
             }
             catch (Exception ex)
             {
                 Logger.Error("FLYLEAF", "Falha ao inicializar o motor FlyleafLib", ex);
+                return Task.CompletedTask;
             }
         }
+
+        private static bool _isSelfTestMode = false;
 
         private static void HandleException(Exception ex, bool isFatal)
         {
             LogException(ex);
-            if (isFatal)
+            Logger.Flush();
+            if (isFatal && !_isSelfTestMode)
             {
                 MessageBox.Show(
                     "Ocorreu um erro inesperado no LiteTube:\n\n" + (ex != null ? ex.Message : "Erro desconhecido") +
                     "\n\nOs detalhes foram gravados em 'data\\crash.log'. O aplicativo precisará ser reiniciado.",
                     "LiteTube - Falha Inesperada",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error
                 );
             }
         }
@@ -203,7 +216,7 @@ namespace LiteTube
                 if (!Directory.Exists(dataDir)) Directory.CreateDirectory(dataDir);
                 string crashLog = Path.Combine(dataDir, "crash.log");
                 string entry = string.Format("[{0:yyyy-MM-dd HH:mm:ss}] {1}\r\n{2}\r\n----------------------------------------\r\n",
-                    DateTime.Now, ex.GetType().FullName, ex.ToString());
+                    DateTime.Now, ex.GetType().FullName, Logger.SanitizeSensitiveData(ex.ToString()));
                 File.AppendAllText(crashLog, entry);
             }
             catch { }
