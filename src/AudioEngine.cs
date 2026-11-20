@@ -149,18 +149,6 @@ namespace LiteTube
             }
         }
 
-        public double MaxVolumeCeiling
-        {
-            get { return 1.0; }
-            set { }
-        }
-
-        public double Balance
-        {
-            get { return 0.0; }
-            set { }
-        }
-
         public double PlaybackSpeed
         {
             get { return _player != null ? _player.Speed : 1.0; }
@@ -171,11 +159,6 @@ namespace LiteTube
                     _player.Speed = Math.Max(0.5, Math.Min(2.0, value));
                 }
             }
-        }
-
-        public double EffectiveOutputVolumePercent
-        {
-            get { return (int)Math.Round(_config.MusicVolume * 100); }
         }
 
         public void ToggleMute()
@@ -309,55 +292,12 @@ namespace LiteTube
             PlayIndex(idx);
         }
 
-        public void PlaySingleAndAddToQueue(TrackItem track)
-        {
-            if (track == null) return;
-            for (int i = 0; i < _queue.Count; i++)
-            {
-                if (string.Equals(_queue[i].Id, track.Id, StringComparison.OrdinalIgnoreCase))
-                {
-                    PlayIndex(i);
-                    return;
-                }
-            }
-            _queue.Add(track);
-            if (QueueUpdated != null) SafeDispatch(QueueUpdated);
-            PlayIndex(_queue.Count - 1);
-        }
-
         public void AddToQueue(TrackItem track)
         {
             if (track == null) return;
             _queue.Add(track);
             if (QueueUpdated != null) SafeDispatch(QueueUpdated);
             EmitStatus("Adicionado à fila de música: " + track.Title);
-        }
-
-        public void RemoveFromQueueAt(int index)
-        {
-            if (index < 0 || index >= _queue.Count) return;
-            bool wasCurrent = (index == _currentIndex);
-            _queue.RemoveAt(index);
-
-            if (index < _currentIndex)
-            {
-                _currentIndex--;
-            }
-            else if (wasCurrent)
-            {
-                if (_queue.Count == 0)
-                {
-                    Stop();
-                    _currentIndex = -1;
-                }
-                else
-                {
-                    if (_currentIndex >= _queue.Count) _currentIndex = 0;
-                    PlayIndex(_currentIndex);
-                }
-            }
-
-            if (QueueUpdated != null) SafeDispatch(QueueUpdated);
         }
 
         public async void PlayIndex(int index)

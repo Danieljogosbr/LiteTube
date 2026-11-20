@@ -54,27 +54,5 @@ namespace LiteTube
 
             return rawDate;
         }
-
-        public void ApplyToTrackItem(TrackItem track)
-        {
-            if (track == null) return;
-            if (!string.IsNullOrWhiteSpace(Title) &&
-                (string.IsNullOrWhiteSpace(track.Title) || track.Title.StartsWith("YouTube") || track.Title.StartsWith("Vídeo do YouTube (")))
-                track.Title = Title;
-            if (!string.IsNullOrWhiteSpace(Author) && (string.IsNullOrWhiteSpace(track.Artist) || track.Artist == "YouTube" || track.Artist == "Canal do YouTube"))
-                track.Artist = Author;
-            if (!string.IsNullOrWhiteSpace(ThumbnailUrl) && string.IsNullOrWhiteSpace(track.CustomThumbUrl))
-                track.CustomThumbUrl = ThumbnailUrl;
-            if (DurationSeconds > 0 && track.DurationSeconds <= 0)
-                track.DurationSeconds = (int)DurationSeconds;
-            if (!string.IsNullOrWhiteSpace(Description))
-                track.Description = Description;
-            if (ViewCount > 0)
-                track.ViewCount = ViewCount;
-            if (!string.IsNullOrWhiteSpace(UploadDateRaw))
-                track.UploadDateRaw = UploadDateRaw;
-            if (AvailableResolutions != null && AvailableResolutions.Count > 0)
-                track.AvailableResolutions = new List<int>(AvailableResolutions);
-        }
     }
 }

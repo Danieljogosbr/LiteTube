@@ -460,17 +460,5 @@ namespace LiteTube
             Save();
             return true;
         }
-
-        public void AddSearchHistory(string? query)
-        {
-            string clean = (query ?? "").Trim();
-            if (clean.Length < 2) return;
-            SearchHistory ??= new List<string>();
-            SearchHistory.RemoveAll(x => string.Equals(x, clean, StringComparison.OrdinalIgnoreCase));
-            SearchHistory.Insert(0, clean);
-            if (SearchHistory.Count > 25)
-                SearchHistory.RemoveRange(25, SearchHistory.Count - 25);
-            Save();
-        }
     }
 }

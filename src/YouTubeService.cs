@@ -30,10 +30,6 @@ namespace LiteTube
         private static readonly SemaphoreSlim _avatarResolveSemaphore = new SemaphoreSlim(4, 4);
         private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string Url, DateTime ExpiresAtUtc)> _audioUrlMemoryCache
             = new System.Collections.Concurrent.ConcurrentDictionary<string, (string Url, DateTime ExpiresAtUtc)>(StringComparer.OrdinalIgnoreCase);
-        private static readonly object _browserCookieCacheLock = new object();
-        private static string _cachedBrowserCookieHeader;
-        private static string _cachedBrowserCookieBrowser;
-        private static DateTime _cachedBrowserCookieExpiryUtc = DateTime.MinValue;
 
         public static string GetCachedChannelAvatarUrl(string channelId, string channelName)
         {
@@ -281,39 +277,6 @@ namespace LiteTube
             if (!Directory.Exists(_cacheDir)) Directory.CreateDirectory(_cacheDir);
 
             EnforceCacheSizeLimit(100);
-        }
-
-        public bool IsYtDlpAvailable()
-        {
-            return YtDlpResolver.IsAvailable();
-        }
-
-        public async Task<bool> EnsureYtDlpAsync(Action<string> onStatus)
-        {
-            if (File.Exists(_ytDlpPath)) return true;
-
-            try
-            {
-                if (onStatus != null) onStatus("Baixando motor de mídia (yt-dlp.exe)...");
-                if (!Directory.Exists(_binDir)) Directory.CreateDirectory(_binDir);
-
-                await Task.Run(async () =>
-                {
-                    using (var resp = await HttpPipeline.Client.GetAsync("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe").ConfigureAwait(false))
-                    {
-                        resp.EnsureSuccessStatusCode();
-                        using (var fs = new FileStream(_ytDlpPath, FileMode.Create, FileAccess.Write, FileShare.None))
-                        {
-                            await resp.Content.CopyToAsync(fs).ConfigureAwait(false);
-                        }
-                    }
-                });
-                return File.Exists(_ytDlpPath);
-            }
-            catch
-            {
-                return false;
-            }
         }
 
         /// <summary>
@@ -753,12 +716,6 @@ namespace LiteTube
             });
         }
 
-        public async Task<List<TrackItem>> FetchRelatedVideosAsync(string videoId, AppConfig config, int maxItems = 35)
-        {
-            var details = await FetchWatchNextDetailsAsync(videoId, config, maxItems);
-            return details.RelatedVideos;
-        }
-
         /// <summary>
         /// Infinite scroll inside a Channel's Videos tab.
         /// </summary>
@@ -907,126 +864,8 @@ namespace LiteTube
 
         private string PostInnerTubeMusic(string jsonPayload, AppConfig config = null, string endpointUrl = "https://music.youtube.com/youtubei/v1/browse?prettyPrint=false")
         {
-            var headers = GoogleSessionService.Shared.BuildMusicHeaders(config, out bool hasAuthCookies);
-
-            if (!hasAuthCookies && config != null)
-            {
-                string cookieHeader = ResolveCookieHeaderForConfig(config);
-                if (!string.IsNullOrEmpty(cookieHeader))
-                {
-                    headers["Cookie"] = cookieHeader;
-                    string sapisidHash = GoogleSessionService.BuildSapisidHashHeader(cookieHeader, "https://music.youtube.com");
-                    if (!string.IsNullOrEmpty(sapisidHash))
-                    {
-                        headers["Authorization"] = sapisidHash;
-                        headers["X-Goog-AuthUser"] = "0";
-                    }
-                }
-            }
-
+            var headers = GoogleSessionService.Shared.BuildMusicHeaders(config, out _);
             return HttpPipeline.PostJson(endpointUrl, jsonPayload, "https://music.youtube.com/", headers);
-        }
-
-        private string ResolveCookieHeaderForConfig(AppConfig config)
-        {
-            if (config == null) return null;
-
-            try
-            {
-                string vaultFile = CookieVault.GetVaultFilePath();
-                string legacyFile = CookieVault.GetLegacyPlaintextFilePath();
-
-                foreach (string candidate in new[] { config.CookiesFilePath, vaultFile, legacyFile })
-                {
-                    if (!string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate))
-                    {
-                        string h = LoadCookieHeaderFromNetscapeFile(candidate);
-                        if (!string.IsNullOrEmpty(h)) return h;
-                    }
-                }
-
-                if (!string.IsNullOrEmpty(config.BrowserForCookies) && config.BrowserForCookies != "none" && File.Exists(_ytDlpPath))
-                {
-                    lock (_browserCookieCacheLock)
-                    {
-                        if (!string.IsNullOrEmpty(_cachedBrowserCookieHeader) &&
-                            string.Equals(_cachedBrowserCookieBrowser, config.BrowserForCookies, StringComparison.OrdinalIgnoreCase) &&
-                            DateTime.UtcNow < _cachedBrowserCookieExpiryUtc)
-                        {
-                            return _cachedBrowserCookieHeader;
-                        }
-                    }
-
-                    string tempCookiePath = Path.Combine(Path.GetTempPath(), "litetube_sess_" + Guid.NewGuid().ToString("N") + ".txt");
-                    try
-                    {
-                        string args = string.Format("--cookies-from-browser {0} --cookies \"{1}\" --skip-download --no-warnings \"https://music.youtube.com/\"",
-                            config.BrowserForCookies, tempCookiePath);
-                        RunYtDlpProcess(args, 10000);
-
-                        if (File.Exists(tempCookiePath) && new FileInfo(tempCookiePath).Length > 100)
-                        {
-                            string sanitized = CookieVault.SanitizeNetscapeContent(File.ReadAllText(tempCookiePath, Encoding.UTF8));
-                            string h = CookieVault.BuildCookieHeaderFromNetscapeContent(sanitized);
-                            if (!string.IsNullOrEmpty(h))
-                            {
-                                lock (_browserCookieCacheLock)
-                                {
-                                    _cachedBrowserCookieHeader = h;
-                                    _cachedBrowserCookieBrowser = config.BrowserForCookies;
-                                    _cachedBrowserCookieExpiryUtc = DateTime.UtcNow.AddMinutes(20);
-                                }
-                                return h;
-                            }
-                        }
-                    }
-                    finally
-                    {
-                        try { if (File.Exists(tempCookiePath)) File.Delete(tempCookiePath); } catch { }
-                    }
-                }
-            }
-            catch { }
-
-            return null;
-        }
-
-        private static string BuildSapisidHashHeader(string cookieHeader, string origin)
-        {
-            if (string.IsNullOrEmpty(cookieHeader)) return null;
-            try
-            {
-                string sapisid = ExtractCookieValue(cookieHeader, "SAPISID");
-                if (string.IsNullOrEmpty(sapisid))
-                {
-                    sapisid = ExtractCookieValue(cookieHeader, "__Secure-3PAPISID");
-                }
-                if (string.IsNullOrEmpty(sapisid)) return null;
-
-                long ts = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
-                string raw = string.Format("{0} {1} {2}", ts, sapisid, origin);
-                using (var sha1 = SHA1.Create())
-                {
-                    byte[] hashBytes = sha1.ComputeHash(Encoding.UTF8.GetBytes(raw));
-                    var sb = new StringBuilder(hashBytes.Length * 2);
-                    for (int i = 0; i < hashBytes.Length; i++)
-                    {
-                        sb.Append(hashBytes[i].ToString("x2"));
-                    }
-                    return string.Format("SAPISIDHASH {0}_{1}", ts, sb.ToString());
-                }
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        private static string ExtractCookieValue(string cookieHeader, string key)
-        {
-            if (string.IsNullOrEmpty(cookieHeader) || string.IsNullOrEmpty(key)) return null;
-            var m = Regex.Match(cookieHeader, "(?:^|;\\s*)" + Regex.Escape(key) + "=([^;]+)");
-            return m.Success ? m.Groups[1].Value.Trim() : null;
         }
 
         /// <summary>
@@ -1057,7 +896,7 @@ namespace LiteTube
                     }
 
                     // Check if user had cookies or if response returned too few personalized tracks
-                    string cookieCheck = ResolveCookieHeaderForConfig(config);
+                    string cookieCheck = GoogleSessionService.Shared.ResolveCookieHeader(config);
                     bool hasAuthSession = !string.IsNullOrEmpty(cookieCheck) &&
                                           (cookieCheck.IndexOf("SAPISID", StringComparison.OrdinalIgnoreCase) >= 0 ||
                                            cookieCheck.IndexOf("LOGIN_INFO", StringComparison.OrdinalIgnoreCase) >= 0 ||
@@ -1352,13 +1191,6 @@ namespace LiteTube
 
                 if (results.Count >= 80) return;
             }
-        }
-
-        private static string LoadCookieHeaderFromNetscapeFile(string filePath)
-        {
-            if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath)) return null;
-            string plaintext = CookieVault.ReadCookiesPlaintext(filePath);
-            return CookieVault.BuildCookieHeaderFromNetscapeContent(plaintext);
         }
 
         /// <summary>
@@ -2066,9 +1898,6 @@ namespace LiteTube
             catch { }
         }
 
-        private static CookieVault.YtDlpCookieScope CreateCookieScope(AppConfig config)
-            => CookieVault.CreateYtDlpCookieScope(config?.CookiesFilePath, config?.BrowserForCookies);
-
         private string RunYtDlpFastUrl(string arguments, int timeoutMs)
         {
             string err;
@@ -2401,52 +2230,6 @@ namespace LiteTube
             _audioUrlMemoryCache[videoId] = (url, now.AddHours(2));
         }
 
-        public static bool HasCachedAudioUrl(string videoId)
-        {
-            if (string.IsNullOrEmpty(videoId)) return false;
-            if (_audioUrlMemoryCache.TryGetValue(videoId, out var entry))
-            {
-                return !string.IsNullOrEmpty(entry.Url) && entry.ExpiresAtUtc > DateTime.UtcNow;
-            }
-            return false;
-        }
-
-        public async Task<bool> PrefetchAudioUrlOnHoverAsync(TrackItem track, AppConfig config, CancellationToken token)
-        {
-            if (track == null || string.IsNullOrEmpty(track.Id) || token.IsCancellationRequested) return false;
-            if (HasCachedAudioUrl(track.Id)) return true;
-
-            string safeId = Regex.Replace(track.Id, "[^a-zA-Z0-9_-]", "");
-            string cachedFile = Path.Combine(_cacheDir, safeId + ".m4a");
-            if (File.Exists(cachedFile) && new FileInfo(cachedFile).Length > 10240) return true;
-
-            return await Task.Run(() =>
-            {
-                if (token.IsCancellationRequested) return false;
-                string videoUrl = "https://www.youtube.com/watch?v=" + track.Id;
-                using var cookieScope = CookieVault.CreateYtDlpCookieScope(config?.CookiesFilePath, config?.BrowserForCookies);
-                string cookieArg = cookieScope.Arg;
-                string denoPath = Path.Combine(_binDir, "deno.exe");
-                string jsArg = File.Exists(denoPath) ? string.Format("--js-runtimes \"deno:{0}\" ", denoPath) : "";
-                string formatSelector = "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio";
-
-                string args = string.Format(
-                    "{0}{1}--no-playlist --no-warnings --extractor-args \"youtube:skip=hls,translated_subs\" -f \"{2}\" -g \"{3}\"",
-                    !string.IsNullOrEmpty(cookieArg) ? cookieArg : "",
-                    jsArg,
-                    formatSelector,
-                    videoUrl);
-
-                string resolved = RunYtDlpFastUrl(args, 12000);
-                if (!string.IsNullOrEmpty(resolved) && !token.IsCancellationRequested)
-                {
-                    CacheResolvedAudioUrl(track.Id, resolved);
-                    return true;
-                }
-                return false;
-            }, token).ConfigureAwait(false);
-        }
-
         public void PrefetchTrackInBackground(TrackItem nextTrack, AppConfig config)
         {
             if (nextTrack == null || string.IsNullOrEmpty(nextTrack.Id)) return;
@@ -2504,44 +2287,6 @@ namespace LiteTube
                     {
                         totalBytes -= len;
                     }
-                }
-            }
-            catch { }
-        }
-
-        public void GetCacheStats(out int trackCount, out double totalSizeMB)
-        {
-            GetDirStats(_cacheDir, "*.m4a", out trackCount, out totalSizeMB);
-        }
-
-        private void GetDirStats(string dir, string pattern, out int count, out double sizeMB)
-        {
-            count = 0;
-            sizeMB = 0.0;
-            try
-            {
-                var dirInfo = new DirectoryInfo(dir);
-                if (!dirInfo.Exists) return;
-                FileInfo[] files = dirInfo.GetFiles(pattern);
-                count = files.Length;
-                long bytes = 0;
-                for (int i = 0; i < files.Length; i++)
-                {
-                    bytes += files[i].Length;
-                }
-                sizeMB = Math.Round(bytes / (1024.0 * 1024.0), 1);
-            }
-            catch { }
-        }
-
-        public void ClearAllCache()
-        {
-            try
-            {
-                var dirInfo = new DirectoryInfo(_cacheDir);
-                if (dirInfo.Exists)
-                {
-                    foreach (var f in dirInfo.GetFiles("*.*")) TryDeleteFile(f.FullName);
                 }
             }
             catch { }

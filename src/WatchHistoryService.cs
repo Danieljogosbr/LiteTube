@@ -229,31 +229,6 @@ namespace LiteTube
             ScheduleSaveAsync(snapshot);
         }
 
-        public void UpdateVideoMetadata(string videoId, string title, string author, long durationSeconds)
-        {
-            if (string.IsNullOrWhiteSpace(videoId)) return;
-
-            List<WatchHistoryEntry> snapshot = null;
-            lock (_lock)
-            {
-                for (int i = 0; i < _entries.Count; i++)
-                {
-                    if (string.Equals(_entries[i].VideoId, videoId, StringComparison.OrdinalIgnoreCase))
-                    {
-                        var e = _entries[i];
-                        bool changed = false;
-                        if (!string.IsNullOrWhiteSpace(title) && e.Title != title) { e.Title = title; changed = true; }
-                        if (!string.IsNullOrWhiteSpace(author) && e.Author != author) { e.Author = author; changed = true; }
-                        if (durationSeconds > 0 && e.DurationSeconds != durationSeconds) { e.DurationSeconds = durationSeconds; changed = true; }
-                        if (changed) snapshot = CloneSnapshotUnsafe();
-                        break;
-                    }
-                }
-            }
-
-            if (snapshot != null) ScheduleSaveAsync(snapshot);
-        }
-
         public void UpdatePlaybackProgress(string videoId, long positionSeconds, long durationSeconds, bool saveImmediatelySync = false)
         {
             if (string.IsNullOrWhiteSpace(videoId)) return;

@@ -576,12 +576,6 @@ namespace LiteTube
             catch { }
         }
 
-        public void SyncOverlayBounds()
-        {
-            if (_isDisposed) return;
-            RefreshTimelineVisuals();
-        }
-
         // ====================================================================
         // AUTO-HIDE INACTIVITY (2.5 SECONDS + GPU OPACITY ANIMATION)
         // ====================================================================
@@ -1476,21 +1470,6 @@ namespace LiteTube
                 _gearQualityGrid.Children.Add(btn);
                 _gearQualityButtons[targetHeight] = btn;
             }
-        }
-
-        public void SetActiveCodecLabel(string rawCodec)
-        {
-            string s = "";
-            if (!string.IsNullOrWhiteSpace(rawCodec))
-            {
-                if (rawCodec.IndexOf("AV1", StringComparison.OrdinalIgnoreCase) >= 0) s = "AV1";
-                else if (rawCodec.IndexOf("VP9.2", StringComparison.OrdinalIgnoreCase) >= 0) s = "VP9 HDR";
-                else if (rawCodec.IndexOf("VP9", StringComparison.OrdinalIgnoreCase) >= 0) s = "VP9";
-                else if (rawCodec.IndexOf("H.264", StringComparison.OrdinalIgnoreCase) >= 0 || rawCodec.IndexOf("AVC", StringComparison.OrdinalIgnoreCase) >= 0) s = "H.264";
-                else if (rawCodec.IndexOf("HLS", StringComparison.OrdinalIgnoreCase) >= 0) s = "HLS";
-            }
-            _activeCodecShort = s;
-            RunOnWpfDispatcher(() => UpdateQualityAndSpeedVisuals(_activeQualityHeight, _activePlaybackSpeed));
         }
 
         public void UpdateQualityAndSpeedVisuals(int qualityHeight, double speedRatio)

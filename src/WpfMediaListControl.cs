@@ -59,7 +59,6 @@ namespace LiteTube
         private SolidColorBrush _accentBrush;
         private Func<string, bool> _isFavoriteOrSavedCheck;
         private TrackItem _hoveredPrefetchItem;
-        private long _lastWpfWheelHandledTick;
 
         public event Action<int, TrackItem> ItemActivated;
         public event Action<TrackItem> ChannelClicked;
@@ -557,21 +556,6 @@ namespace LiteTube
             UpdateAllPlayingStates();
         }
 
-        public void InvalidateItem(int index)
-        {
-            if (index >= 0 && index < _viewModels.Count)
-            {
-                var vm = _viewModels[index];
-                if (_isFavoriteOrSavedCheck != null && !string.IsNullOrEmpty(vm.Id))
-                {
-                    vm.IsFavorite = _isFavoriteOrSavedCheck(vm.Id);
-                }
-                vm.IsPlaying = !string.IsNullOrEmpty(_playingVideoId) &&
-                               string.Equals(vm.Id, _playingVideoId, StringComparison.OrdinalIgnoreCase);
-                vm.RefreshVisualBindings();
-            }
-        }
-
         public void InvalidateCardById(string targetId)
         {
             if (string.IsNullOrEmpty(targetId)) return;
@@ -697,30 +681,6 @@ namespace LiteTube
 
             UpdateEmptyState();
             UpdateFooterState();
-        }
-
-        public bool IsItemVisible(string id)
-        {
-            if (_isSuspended) return false;
-            if (string.IsNullOrEmpty(id) || _viewModels.Count == 0) return false;
-            // No WPF virtualizado com renderizao por GPU, os cards no viewport esto ativos
-            return true;
-        }
-
-        public void PruneOffscreenResources()
-        {
-            if (_isSuspended || _viewModels.Count == 0) return;
-            int cur = _selectedIndex >= 0 ? _selectedIndex : 0;
-            int keepMin = Math.Max(0, cur - 25);
-            int keepMax = Math.Min(_viewModels.Count - 1, cur + 35);
-
-            for (int i = 0; i < _viewModels.Count; i++)
-            {
-                if (i < keepMin || i > keepMax)
-                {
-                    _viewModels[i].UnloadThumbnail();
-                }
-            }
         }
 
         #endregion
@@ -998,7 +958,6 @@ namespace LiteTube
             if (_isEmbeddedWatchGrid)
             {
                 if (WheelDeltaUnhandled != null) WheelDeltaUnhandled(e.Delta);
-                _lastWpfWheelHandledTick = Environment.TickCount64;
                 e.Handled = true;
                 return;
             }
@@ -1023,19 +982,7 @@ namespace LiteTube
 
             double nextOffset = Math.Max(0, Math.Min(sv.ScrollableHeight, sv.VerticalOffset - (e.Delta / 3.0)));
             sv.ScrollToVerticalOffset(nextOffset);
-            _lastWpfWheelHandledTick = Environment.TickCount64;
             e.Handled = true;
-        }
-
-        public bool ConsumeWpfWheelHandled()
-        {
-            long now = Environment.TickCount64;
-            if ((now - _lastWpfWheelHandledTick) <= 80)
-            {
-                _lastWpfWheelHandledTick = 0;
-                return true;
-            }
-            return false;
         }
 
         private void OnListBoxPreviewMouseMove(object sender, MouseEventArgs e)
