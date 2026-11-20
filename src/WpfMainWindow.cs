@@ -268,6 +268,13 @@ namespace LiteTube
 
             _musicView.StatusNotification += msg => _lblStatusText.Text = msg;
             _musicView.AccountStatusMayHaveChanged += () => RefreshGoogleAccountButtonAsync(false);
+            _musicAudio.TrackChanged += _ =>
+            {
+                if (_config.AutoPauseMusicWhenVideoPlays && _videoView.PlaybackController.IsPlaying)
+                {
+                    _videoView.PlaybackController.PauseIfPlaying();
+                }
+            };
             _musicView.WatchClipRequested += track =>
             {
                 SwitchEnvironment("video");
@@ -361,6 +368,11 @@ namespace LiteTube
 
             bool isVideo = _activeEnvironment == "video";
             MemoryOptimizer.IsVideoModeActive = isVideo;
+
+            if (!isVideo && _videoView.PlaybackController.IsPlaying)
+            {
+                _videoView.PlaybackController.PauseIfPlaying();
+            }
 
             _videoHost.Visibility = isVideo ? Visibility.Visible : Visibility.Collapsed;
             _musicHost.Visibility = isVideo ? Visibility.Collapsed : Visibility.Visible;

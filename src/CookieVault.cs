@@ -255,6 +255,12 @@ namespace LiteTube
                         catch { }
                     }
                 }
+
+                string legacyCacheCookie = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "data", "cache", "browser_session_cookies.txt");
+                if (File.Exists(legacyCacheCookie))
+                {
+                    try { File.Delete(legacyCacheCookie); deleted++; } catch { }
+                }
             }
             catch { }
             return deleted;

@@ -408,10 +408,17 @@ namespace LiteTube
                 _items.AddRange(items);
             }
 
+            int defaultDecodeW = (_isMusicEnvironment && !_isGridMode) ? 120 : (_isCompactSidebarMode ? 160 : 320);
+            bool needChannelAvatars = _isGridMode && !_isMusicEnvironment;
+
             for (int i = 0; i < _items.Count; i++)
             {
                 var it = _items[i];
-                var vm = new TrackItemViewModel(it, i, _accentBrush, Dispatcher);
+                var vm = new TrackItemViewModel(it, i, _accentBrush, Dispatcher)
+                {
+                    ThumbnailDecodeWidth = defaultDecodeW,
+                    EnableChannelAvatarLookup = needChannelAvatars
+                };
                 if (_isFavoriteOrSavedCheck != null && !string.IsNullOrEmpty(it.Id))
                 {
                     vm.IsFavorite = _isFavoriteOrSavedCheck(it.Id);
@@ -456,6 +463,9 @@ namespace LiteTube
             int added = 0;
             var newVms = new List<TrackItemViewModel>();
 
+            int defaultDecodeW = (_isMusicEnvironment && !_isGridMode) ? 120 : (_isCompactSidebarMode ? 160 : 320);
+            bool needChannelAvatars = _isGridMode && !_isMusicEnvironment;
+
             for (int i = 0; i < moreItems.Count; i++)
             {
                 var it = moreItems[i];
@@ -464,7 +474,11 @@ namespace LiteTube
                 {
                     int idx = _items.Count;
                     _items.Add(it);
-                    var vm = new TrackItemViewModel(it, idx, _accentBrush, Dispatcher);
+                    var vm = new TrackItemViewModel(it, idx, _accentBrush, Dispatcher)
+                    {
+                        ThumbnailDecodeWidth = defaultDecodeW,
+                        EnableChannelAvatarLookup = needChannelAvatars
+                    };
                     if (_isFavoriteOrSavedCheck != null)
                     {
                         vm.IsFavorite = _isFavoriteOrSavedCheck(it.Id);
@@ -737,11 +751,21 @@ namespace LiteTube
 
             if (_isGridMode)
             {
+                if (!ReferenceEquals(_listBox.ItemsSource, _gridRows))
+                {
+                    _listBox.ItemsSource = null;
+                }
+                _linearRows.Clear();
                 RebuildGridRows();
                 _listBox.ItemsSource = _gridRows;
             }
             else
             {
+                if (!ReferenceEquals(_listBox.ItemsSource, _linearRows))
+                {
+                    _listBox.ItemsSource = null;
+                }
+                _gridRows.Clear();
                 _linearRows.Clear();
                 for (int i = 0; i < _viewModels.Count; i++)
                 {
@@ -1589,6 +1613,8 @@ namespace LiteTube
             }
         }
 
+        public bool EnableChannelAvatarLookup { get; set; } = true;
+
         public TrackItemViewModel(TrackItem model, int index, SolidColorBrush accent, Dispatcher dispatcher)
         {
             _model = model;
@@ -1637,7 +1663,10 @@ namespace LiteTube
 
         public async void EnsureThumbnailLoaded()
         {
-            EnsureChannelAvatarLoaded();
+            if (EnableChannelAvatarLookup)
+            {
+                EnsureChannelAvatarLoaded();
+            }
 
             if (_thumbnailSource != null) return;
 
@@ -1671,7 +1700,7 @@ namespace LiteTube
 
         public async void EnsureChannelAvatarLoaded()
         {
-            if (_channelAvatarSource != null || _model == null || IsPlaylistCard) return;
+            if (!EnableChannelAvatarLookup || _channelAvatarSource != null || _model == null || IsPlaylistCard) return;
             if (_avatarRequested) return;
             _avatarRequested = true;
 

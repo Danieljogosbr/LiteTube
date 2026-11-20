@@ -159,7 +159,7 @@ namespace LiteTube
 
             if (string.IsNullOrEmpty(flightKey)) return "";
 
-            return await _inFlightAvatarResolves.GetOrAdd(flightKey, async _ =>
+            return await _inFlightAvatarResolves.GetOrAdd(flightKey, _ => Task.Run(async () =>
             {
                 try
                 {
@@ -247,7 +247,7 @@ namespace LiteTube
                     _inFlightAvatarResolves.TryRemove(flightKey, out removed);
                 }
                 return "";
-            }).ConfigureAwait(false);
+            })).ConfigureAwait(false);
         }
 
         static YouTubeService()

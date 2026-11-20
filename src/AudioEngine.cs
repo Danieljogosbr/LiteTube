@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Threading;
 using FlyleafLib;
 using FlyleafLib.MediaPlayer;
 
@@ -22,13 +24,15 @@ namespace LiteTube
         private readonly List<TrackItem> _queue;
         private readonly Random _rng;
         private readonly System.Threading.Timer _stateMonitorTimer;
-        private readonly SynchronizationContext _syncContext;
+        private readonly SemaphoreSlim _playerCmdLock = new SemaphoreSlim(1, 1);
+        private Dispatcher _uiDispatcher;
 
         private int _currentIndex = -1;
         private bool _isPlaying = false;
         private bool _isLoading = false;
         private bool _isDisposed = false;
         private CancellationTokenSource _loadCts;
+        private int _playSequence = 0;
         private DateTime _playStartUtc = DateTime.MinValue;
         private int _consecutiveInstantEnds = 0;
         private int _consecutiveFailures = 0;
@@ -53,10 +57,22 @@ namespace LiteTube
             _config = config;
             _queue = new List<TrackItem>();
             _rng = new Random();
-            _syncContext = SynchronizationContext.Current;
+            _uiDispatcher = Application.Current != null ? Application.Current.Dispatcher : Dispatcher.CurrentDispatcher;
 
             // Monitor de segurança periódico para detecção de término e SponsorBlock
             _stateMonitorTimer = new System.Threading.Timer(OnStateMonitorTick, null, 250, 250);
+        }
+
+        private Dispatcher ResolveUiDispatcher()
+        {
+            if (_uiDispatcher != null && !_uiDispatcher.HasShutdownStarted)
+                return _uiDispatcher;
+            if (Application.Current != null && Application.Current.Dispatcher != null)
+            {
+                _uiDispatcher = Application.Current.Dispatcher;
+                return _uiDispatcher;
+            }
+            return null;
         }
 
         private void EnsurePlayerCreated()
@@ -184,9 +200,10 @@ namespace LiteTube
             {
                 try
                 {
-                    if (_player != null)
+                    var p = _player;
+                    if (p != null)
                     {
-                        _player.Pause();
+                        Task.Run(() => { try { p.Pause(); } catch { } });
                     }
                     _isPlaying = false;
                     if (PlaybackStateChanged != null) SafeDispatch(delegate { PlaybackStateChanged(_isPlaying, _isLoading); });
@@ -243,22 +260,23 @@ namespace LiteTube
 
         public void SafeDispatch(Action action)
         {
-            if (action == null) return;
-            if (_syncContext != null)
+            if (action == null || _isDisposed) return;
+            try
             {
-                try
+                var disp = ResolveUiDispatcher();
+                if (disp != null && !disp.HasShutdownStarted)
                 {
-                    _syncContext.Post(delegate { try { action(); } catch { } }, null);
-                }
-                catch
-                {
-                    try { action(); } catch { }
+                    disp.BeginInvoke(new Action(() =>
+                    {
+                        if (!_isDisposed)
+                        {
+                            try { action(); } catch { }
+                        }
+                    }), DispatcherPriority.Normal);
+                    return;
                 }
             }
-            else
-            {
-                try { action(); } catch { }
-            }
+            catch { }
         }
 
         public void SeekToSeconds(double seconds)
@@ -344,7 +362,9 @@ namespace LiteTube
 
         public async void PlayIndex(int index)
         {
-            if (index < 0 || index >= _queue.Count) return;
+            if (index < 0 || index >= _queue.Count || _isDisposed) return;
+
+            int seq = Interlocked.Increment(ref _playSequence);
 
             if (_loadCts != null)
             {
@@ -404,7 +424,7 @@ namespace LiteTube
             }
 
             string source = await _ytService.GetPlayableSourceAsync(track, _config, token);
-            if (token.IsCancellationRequested) return;
+            if (token.IsCancellationRequested || seq != Volatile.Read(ref _playSequence) || _isDisposed) return;
 
             if (string.IsNullOrEmpty(source))
             {
@@ -413,7 +433,7 @@ namespace LiteTube
                 {
                     EmitStatus(string.Format("⚠️ Faixa '{0}' indisponível no momento. Avançando...", track.Title));
                     await Task.Delay(500);
-                    if (!token.IsCancellationRequested) SafeDispatch(PlayNext);
+                    if (!token.IsCancellationRequested && seq == Volatile.Read(ref _playSequence)) SafeDispatch(PlayNext);
                     return;
                 }
                 _consecutiveFailures = 0;
@@ -427,15 +447,32 @@ namespace LiteTube
             string failMsg = "";
             try
             {
-                await Program.EngineReadyTask.ConfigureAwait(true);
-                if (token.IsCancellationRequested || _isDisposed) return;
+                await Program.EngineReadyTask.ConfigureAwait(false);
+                if (token.IsCancellationRequested || seq != Volatile.Read(ref _playSequence) || _isDisposed) return;
 
-                EnsurePlayerCreated();
+                // Executa criação/Stop/Open fora da UI Thread do WPF para evitar deadlock
+                // com o Utils.UIInvoke (Dispatcher.Invoke) interno do FlyleafLib!
+                await Task.Run(async () =>
+                {
+                    await _playerCmdLock.WaitAsync().ConfigureAwait(false);
+                    try
+                    {
+                        if (token.IsCancellationRequested || seq != Volatile.Read(ref _playSequence) || _isDisposed)
+                            return;
 
-                ApplyAudioSettingsToPlayer();
-                _player.Stop();
-                _player.OpenAsync(source);
-                _playStartUtc = DateTime.UtcNow;
+                        EnsurePlayerCreated();
+                        ApplyAudioSettingsToPlayer();
+                        try { _player.Stop(); } catch { }
+                        _player.OpenAsync(source);
+                        _playStartUtc = DateTime.UtcNow;
+                    }
+                    finally
+                    {
+                        _playerCmdLock.Release();
+                    }
+                }).ConfigureAwait(false);
+
+                if (token.IsCancellationRequested || seq != Volatile.Read(ref _playSequence) || _isDisposed) return;
 
                 _consecutiveFailures = 0;
                 _isLoading = false;
@@ -464,7 +501,7 @@ namespace LiteTube
                 {
                     EmitStatus(string.Format("⚠️ Falha ao tocar '{0}'. Avançando...", track.Title));
                     await Task.Delay(500);
-                    if (!token.IsCancellationRequested) SafeDispatch(PlayNext);
+                    if (!token.IsCancellationRequested && seq == Volatile.Read(ref _playSequence)) SafeDispatch(PlayNext);
                     return;
                 }
                 _consecutiveFailures = 0;
@@ -493,7 +530,8 @@ namespace LiteTube
                 {
                     if (_player != null)
                     {
-                        _player.Pause();
+                        var p = _player;
+                        Task.Run(() => { try { p.Pause(); } catch { } });
                     }
                     _isPlaying = false;
                     EmitStatus("🎵 Pausado: " + CurrentTrack.Title);
@@ -503,7 +541,8 @@ namespace LiteTube
                     if (_player != null)
                     {
                         ApplyAudioSettingsToPlayer();
-                        _player.Play();
+                        var p = _player;
+                        Task.Run(() => { try { p.Play(); } catch { } });
                     }
                     _isPlaying = true;
                     EmitStatus("🎵 Tocando: " + CurrentTrack.Title);
@@ -515,6 +554,7 @@ namespace LiteTube
 
         public void Stop()
         {
+            Interlocked.Increment(ref _playSequence);
             if (_loadCts != null)
             {
                 try { _loadCts.Cancel(); } catch { }
@@ -530,9 +570,24 @@ namespace LiteTube
 
         private void StopCurrentPlaybackInternal()
         {
-            if (_player != null)
+            var p = _player;
+            if (p != null)
             {
-                try { _player.Stop(); } catch { }
+                // Executa Stop em background serializado para NUNCA bloquear a UI Thread do WPF
+                // caso o FlyleafLib esteja dentro de Utils.UIInvoke (Dispatcher.Invoke)
+                Task.Run(async () =>
+                {
+                    await _playerCmdLock.WaitAsync().ConfigureAwait(false);
+                    try
+                    {
+                        p.Stop();
+                    }
+                    catch { }
+                    finally
+                    {
+                        _playerCmdLock.Release();
+                    }
+                });
             }
         }
 

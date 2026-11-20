@@ -217,7 +217,11 @@ namespace LiteTube
                 _prefetchedQualityHeight = 0;
                 _prefetchedStreams = null;
 
-                try { _player?.Stop(); } catch { }
+                var existingPlayer = _player;
+                if (existingPlayer != null)
+                {
+                    _ = Task.Run(() => { try { existingPlayer.Pause(); } catch { } });
+                }
 
                 playCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
                 _activePlayResolveCts = playCts;
@@ -532,13 +536,14 @@ namespace LiteTube
 
         public void PauseIfPlaying()
         {
-            if (_player != null && _player.IsPlaying)
+            if (_player != null && (_isPlaying || _player.IsPlaying))
             {
                 try
                 {
-                    _player.Pause();
+                    var p = _player;
                     _isPlaying = false;
                     SaveCurrentPlaybackProgress(false);
+                    _ = Task.Run(() => { try { p.Pause(); } catch { } });
                 }
                 catch { }
             }
@@ -548,7 +553,12 @@ namespace LiteTube
         {
             SaveCurrentPlaybackProgress(false);
             StopActiveSession();
-            try { _player?.Stop(); } catch { }
+            var p = _player;
+            _isPlaying = false;
+            if (p != null)
+            {
+                _ = Task.Run(() => { try { p.Stop(); } catch { } });
+            }
             _isPlaying = false;
             _isLoading = false;
             LoadingStateChanged?.Invoke(false, "", "");

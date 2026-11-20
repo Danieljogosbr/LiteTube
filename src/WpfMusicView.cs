@@ -203,12 +203,13 @@ namespace LiteTube
                 _audioEngine.SetQueueAndPlay(_displayedTracks, startIdx);
             };
 
-            _trackList.ItemActivated += async (idx, item) =>
+            _trackList.ItemActivated += (idx, item) =>
             {
                 if (item == null) return;
                 if (item.IsPlaylistCard)
                 {
-                    await OpenAccountPlaylistAsync(item);
+                    // Despacha a abertura da playlist fora do ciclo MouseLeftButtonUp do ListBoxItem reciclado
+                    _ = Dispatcher.BeginInvoke(new Action(async () => await OpenAccountPlaylistAsync(item)), DispatcherPriority.Normal);
                     return;
                 }
                 if (item.IsChannel)
@@ -405,7 +406,11 @@ namespace LiteTube
             _btnShufflePlayAll.Visibility = Visibility.Collapsed;
             UpdateNavSelection();
 
-            // Modo Grade de Cards para exibir suas playlists do YouTube Music igual ao site oficial
+            // Limpa containers do modo lista antes de ativar o modo Grade de Cards das playlists
+            if (!_trackList.IsGridMode)
+            {
+                _trackList.ClearItems(false);
+            }
             _trackList.IsGridMode = true;
             _trackList.IsMusicEnvironment = false;
             _trackList.SingleClickActivates = true;
@@ -485,6 +490,10 @@ namespace LiteTube
 
         private void SetListModeForTracks()
         {
+            if (_trackList.IsGridMode)
+            {
+                _trackList.ClearItems(false);
+            }
             _trackList.IsGridMode = false;
             _trackList.IsMusicEnvironment = true;
             _trackList.SingleClickActivates = false;
