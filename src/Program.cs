@@ -158,14 +158,13 @@ namespace LiteTube
             try
             {
                 string ffmpegPath = FFmpegResolver.ResolveFFmpegDirectory();
-                string pluginsPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Plugins");
 
                 FlyleafLib.Engine.StartAsync(new FlyleafLib.EngineConfig()
                 {
                     UIRefresh = true,
                     UIRefreshInterval = 50,
                     UICurTimePerSecond = false,
-                    PluginsPath = Directory.Exists(pluginsPath) ? pluginsPath : ffmpegPath,
+                    PluginsPath = ffmpegPath,
                     FFmpegPath = ffmpegPath
                 });
 

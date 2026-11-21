@@ -103,6 +103,7 @@ namespace LiteTube
         private bool _isDescriptionExpanded = false;
         private bool _isChannelView = false;
         private bool _isLoadingMore = false;
+        private int _navRequestSeq = 0;
         private string _activeNavSection = "home";
         private string _activeSearchChip = "all";
         private string _activeChannelId = "";
@@ -642,6 +643,7 @@ namespace LiteTube
         {
             if (string.IsNullOrWhiteSpace(query)) return;
 
+            int reqSeq = ++_navRequestSeq;
             if (_isFullscreen) ToggleFullscreen(false);
             ExitWatchPage();
 
@@ -661,6 +663,7 @@ namespace LiteTube
             try
             {
                 var page = await _ytService.SearchPageAsync(query.Trim(), "video", _config);
+                if (reqSeq != _navRequestSeq) return;
                 _searchVideos = page.Items ?? new List<TrackItem>();
                 _searchContinuationToken = page.ContinuationToken ?? "";
 
@@ -671,16 +674,18 @@ namespace LiteTube
             }
             catch (Exception ex)
             {
-                _lblCatalogHeader.Text = "⚠️ Erro na busca: " + ex.Message;
+                if (reqSeq == _navRequestSeq)
+                    _lblCatalogHeader.Text = "⚠️ Erro na busca: " + ex.Message;
             }
             finally
             {
-                _catalogGrid.IsLoadingSkeleton = false;
+                if (reqSeq == _navRequestSeq) _catalogGrid.IsLoadingSkeleton = false;
             }
         }
 
         public async Task SwitchToNavSectionAsync(string section, bool forceRefresh = false)
         {
+            int reqSeq = ++_navRequestSeq;
             if (_isFullscreen) ToggleFullscreen(false);
             if (IsWatchPageVisible)
             {
@@ -710,9 +715,11 @@ namespace LiteTube
                 try
                 {
                     var page = await YouTubeAccountFeedService.Shared.FetchHomeFeedAsync(_config, forceRefresh);
+                    if (reqSeq != _navRequestSeq) return;
                     if ((page == null || page.Items.Count == 0) && (page == null || !page.SessionExpired))
                     {
                         var fb = await _ytService.FetchUrlOrPlaylistAsync("https://www.youtube.com/", _config, true, 1, 50);
+                        if (reqSeq != _navRequestSeq) return;
                         if (fb.Item1 != null && fb.Item1.Count > 0)
                             page = new AccountFeedPage { Items = fb.Item1, UsedAccountAuth = GoogleSessionService.Shared.HasStoredSession(_config) };
                     }
@@ -736,7 +743,7 @@ namespace LiteTube
                 }
                 finally
                 {
-                    _catalogGrid.IsLoadingSkeleton = false;
+                    if (reqSeq == _navRequestSeq) _catalogGrid.IsLoadingSkeleton = false;
                 }
             }
             else if (_activeNavSection == "subs")
@@ -746,6 +753,7 @@ namespace LiteTube
                 try
                 {
                     var page = await YouTubeAccountFeedService.Shared.FetchSubscriptionsFeedAsync(_config, forceRefresh);
+                    if (reqSeq != _navRequestSeq) return;
                     AccountStatusMayHaveChanged?.Invoke();
                     if (page.Items.Count > 0)
                     {
@@ -766,7 +774,7 @@ namespace LiteTube
                 }
                 finally
                 {
-                    _catalogGrid.IsLoadingSkeleton = false;
+                    if (reqSeq == _navRequestSeq) _catalogGrid.IsLoadingSkeleton = false;
                 }
             }
             else if (_activeNavSection == "history")
@@ -776,6 +784,7 @@ namespace LiteTube
                 try
                 {
                     var page = await YouTubeAccountFeedService.Shared.FetchHistoryFeedAsync(_config, forceRefresh);
+                    if (reqSeq != _navRequestSeq) return;
                     AccountStatusMayHaveChanged?.Invoke();
                     _historyVideos = page.Items;
                     _feedContinuationToken = page.ContinuationToken ?? "";
@@ -795,7 +804,7 @@ namespace LiteTube
                 }
                 finally
                 {
-                    _catalogGrid.IsLoadingSkeleton = false;
+                    if (reqSeq == _navRequestSeq) _catalogGrid.IsLoadingSkeleton = false;
                 }
             }
             else if (_activeNavSection == "playlists")
@@ -805,6 +814,7 @@ namespace LiteTube
                 try
                 {
                     var page = await YouTubeAccountFeedService.Shared.FetchAccountPlaylistsAsync(_config, forceRefresh);
+                    if (reqSeq != _navRequestSeq) return;
                     AccountStatusMayHaveChanged?.Invoke();
                     if (page.Items.Count > 0)
                     {
@@ -825,11 +835,12 @@ namespace LiteTube
                 }
                 finally
                 {
-                    _catalogGrid.IsLoadingSkeleton = false;
+                    if (reqSeq == _navRequestSeq) _catalogGrid.IsLoadingSkeleton = false;
                 }
             }
             else if (_activeNavSection == "you")
             {
+                _catalogGrid.IsLoadingSkeleton = false;
                 _lblCatalogHeader.Text = string.Format("👤 Você • Seus Vídeos Salvos ({0} vídeos)", _config.SavedVideos.Count);
                 _catalogGrid.HasMoreItems = false;
                 _catalogGrid.SetItems(FilterItemsForDisplay(_config.SavedVideos), true);

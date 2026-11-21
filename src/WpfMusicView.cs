@@ -56,6 +56,7 @@ namespace LiteTube
         private string _openedAccountPlaylistContinuationToken = "";
         private TrackItem? _openedAccountPlaylistCard;
         private bool _isLoadingMore = false;
+        private int _navRequestSeq = 0;
         private List<TrackItem> _displayedTracks = new List<TrackItem>();
         private List<TrackItem> _accountPlaylists = new List<TrackItem>();
 
@@ -169,6 +170,7 @@ namespace LiteTube
                 int idx = _lstLocalPlaylists.SelectedIndex;
                 if (idx >= 0 && idx < _config.Playlists.Count)
                 {
+                    _navRequestSeq++;
                     var pl = _config.Playlists[idx];
                     _activeSection = "local_playlist";
                     _openedAccountPlaylistCard = null;
@@ -176,6 +178,7 @@ namespace LiteTube
                     _btnBackToPlaylists.Visibility = Visibility.Collapsed;
                     SetListModeForTracks();
                     UpdateNavSelection();
+                    _trackList.IsLoadingSkeleton = false;
                     _displayedTracks = new List<TrackItem>(pl.Tracks);
                     _lblMusicHeader.Text = string.Format("Playlist Local: {0} ({1} faixas)", pl.Name, pl.Tracks.Count);
                     _trackList.HasMoreItems = false;
@@ -252,7 +255,7 @@ namespace LiteTube
             _playerBar.VolumeChanged += vol =>
             {
                 _audioEngine.Volume = vol;
-                _config.Save();
+                _config.SaveDebounced();
                 _playerBar.UpdateAudioVisuals(_audioEngine.Volume, _audioEngine.IsMuted);
             };
             _playerBar.MuteToggleRequested += () =>
@@ -360,6 +363,7 @@ namespace LiteTube
         public async Task SearchAsync(string query)
         {
             if (string.IsNullOrWhiteSpace(query)) return;
+            int reqSeq = ++_navRequestSeq;
             _activeSection = "search";
             _openedAccountPlaylistCard = null;
             _lstLocalPlaylists.SelectedIndex = -1;
@@ -373,6 +377,7 @@ namespace LiteTube
             try
             {
                 var page = await _ytService.SearchPageAsync(query.Trim(), "music", _config);
+                if (reqSeq != _navRequestSeq) return;
                 _displayedTracks = page.Items ?? new List<TrackItem>();
                 _searchContinuationToken = page.ContinuationToken ?? "";
                 _lblMusicHeader.Text = string.Format("Música: \"{0}\" ({1} faixas)", query.Trim(), _displayedTracks.Count);
@@ -381,7 +386,7 @@ namespace LiteTube
             }
             finally
             {
-                _trackList.IsLoadingSkeleton = false;
+                if (reqSeq == _navRequestSeq) _trackList.IsLoadingSkeleton = false;
             }
         }
 
@@ -397,6 +402,7 @@ namespace LiteTube
 
         private async Task LoadAccountPlaylistsAsync(bool forceRefresh)
         {
+            int reqSeq = ++_navRequestSeq;
             _activeSection = "account_playlists";
             _openedAccountPlaylistCard = null;
             _openedAccountPlaylistContinuationToken = "";
@@ -421,6 +427,7 @@ namespace LiteTube
             try
             {
                 var page = await YouTubeAccountFeedService.Shared.FetchMusicAccountPlaylistsAsync(_config, forceRefresh);
+                if (reqSeq != _navRequestSeq) return;
                 AccountStatusMayHaveChanged?.Invoke();
 
                 if (page.Items.Count > 0)
@@ -445,7 +452,7 @@ namespace LiteTube
             }
             finally
             {
-                _trackList.IsLoadingSkeleton = false;
+                if (reqSeq == _navRequestSeq) _trackList.IsLoadingSkeleton = false;
             }
         }
 
@@ -453,6 +460,7 @@ namespace LiteTube
         {
             if (playlistCard == null || string.IsNullOrEmpty(playlistCard.PlaylistId)) return;
 
+            int reqSeq = ++_navRequestSeq;
             _activeSection = "account_playlist_items";
             _openedAccountPlaylistCard = playlistCard;
             _openedAccountPlaylistContinuationToken = "";
@@ -466,6 +474,7 @@ namespace LiteTube
             try
             {
                 var page = await YouTubeAccountFeedService.Shared.FetchMusicPlaylistItemsAsync(playlistCard.PlaylistId, _config);
+                if (reqSeq != _navRequestSeq) return;
                 if (page.Items.Count > 0)
                 {
                     _displayedTracks = page.Items;
@@ -474,6 +483,7 @@ namespace LiteTube
                 else
                 {
                     var fb = await _ytService.FetchUrlOrPlaylistAsync(playlistCard.PlaylistId, _config, false);
+                    if (reqSeq != _navRequestSeq) return;
                     _displayedTracks = fb.Item1 ?? new List<TrackItem>();
                 }
 
@@ -484,7 +494,7 @@ namespace LiteTube
             }
             finally
             {
-                _trackList.IsLoadingSkeleton = false;
+                if (reqSeq == _navRequestSeq) _trackList.IsLoadingSkeleton = false;
             }
         }
 
@@ -503,6 +513,7 @@ namespace LiteTube
 
         private async Task LoadRecommendedAsync()
         {
+            int reqSeq = ++_navRequestSeq;
             _activeSection = "home";
             _openedAccountPlaylistCard = null;
             _lstLocalPlaylists.SelectedIndex = -1;
@@ -516,6 +527,7 @@ namespace LiteTube
             try
             {
                 var res = await _ytService.FetchPersonalizedMusicFeedAsync(_config);
+                if (reqSeq != _navRequestSeq) return;
                 _displayedTracks = res.Item1 ?? new List<TrackItem>();
                 _lblMusicHeader.Text = string.Format("Recomendados ({0} faixas)", _displayedTracks.Count);
                 _trackList.HasMoreItems = false;
@@ -523,12 +535,13 @@ namespace LiteTube
             }
             finally
             {
-                _trackList.IsLoadingSkeleton = false;
+                if (reqSeq == _navRequestSeq) _trackList.IsLoadingSkeleton = false;
             }
         }
 
         private async Task LoadExploreAsync()
         {
+            int reqSeq = ++_navRequestSeq;
             _activeSection = "explore";
             _openedAccountPlaylistCard = null;
             _lstLocalPlaylists.SelectedIndex = -1;
@@ -542,6 +555,7 @@ namespace LiteTube
             try
             {
                 var res = await _ytService.FetchMusicExploreFeedAsync(_config);
+                if (reqSeq != _navRequestSeq) return;
                 _displayedTracks = res.Item1 ?? new List<TrackItem>();
                 _lblMusicHeader.Text = string.Format("Explorar ({0} faixas)", _displayedTracks.Count);
                 _trackList.HasMoreItems = false;
@@ -549,12 +563,13 @@ namespace LiteTube
             }
             finally
             {
-                _trackList.IsLoadingSkeleton = false;
+                if (reqSeq == _navRequestSeq) _trackList.IsLoadingSkeleton = false;
             }
         }
 
         private void ShowFavorites()
         {
+            _navRequestSeq++;
             _activeSection = "favorites";
             _openedAccountPlaylistCard = null;
             _lstLocalPlaylists.SelectedIndex = -1;
@@ -562,6 +577,7 @@ namespace LiteTube
             _btnBackToPlaylists.Visibility = Visibility.Collapsed;
             SetListModeForTracks();
             UpdateNavSelection();
+            _trackList.IsLoadingSkeleton = false;
 
             _displayedTracks = new List<TrackItem>(_config.Favorites);
             _lblMusicHeader.Text = string.Format("Seus Favoritos ({0} faixas)", _displayedTracks.Count);
@@ -571,6 +587,7 @@ namespace LiteTube
 
         private void ShowQueue()
         {
+            _navRequestSeq++;
             _activeSection = "queue";
             _openedAccountPlaylistCard = null;
             _lstLocalPlaylists.SelectedIndex = -1;
@@ -578,6 +595,7 @@ namespace LiteTube
             _btnBackToPlaylists.Visibility = Visibility.Collapsed;
             SetListModeForTracks();
             UpdateNavSelection();
+            _trackList.IsLoadingSkeleton = false;
 
             _displayedTracks = new List<TrackItem>(_audioEngine.Queue);
             _lblMusicHeader.Text = string.Format("Fila de Reprodução Atual ({0} faixas)", _displayedTracks.Count);
@@ -588,6 +606,7 @@ namespace LiteTube
         private async Task LoadMoreAsync()
         {
             if (_isLoadingMore) return;
+            int reqSeq = _navRequestSeq;
 
             if (_activeSection == "account_playlists" && !string.IsNullOrEmpty(_accountPlaylistsContinuationToken))
             {
@@ -596,6 +615,7 @@ namespace LiteTube
                 try
                 {
                     var next = await YouTubeAccountFeedService.Shared.FetchMusicAccountPlaylistsAsync(_config, true, _accountPlaylistsContinuationToken);
+                    if (reqSeq != _navRequestSeq) return;
                     _accountPlaylistsContinuationToken = next.ContinuationToken ?? "";
                     _trackList.HasMoreItems = !string.IsNullOrEmpty(_accountPlaylistsContinuationToken);
                     if (next.Items.Count > 0)
@@ -620,6 +640,7 @@ namespace LiteTube
                 {
                     var next = await YouTubeAccountFeedService.Shared.FetchMusicPlaylistItemsAsync(
                         _openedAccountPlaylistCard.PlaylistId, _config, _openedAccountPlaylistContinuationToken);
+                    if (reqSeq != _navRequestSeq) return;
                     _openedAccountPlaylistContinuationToken = next.ContinuationToken ?? "";
                     _trackList.HasMoreItems = !string.IsNullOrEmpty(_openedAccountPlaylistContinuationToken);
                     if (next.Items.Count > 0)
@@ -644,6 +665,7 @@ namespace LiteTube
                 try
                 {
                     var next = await _ytService.FetchSearchContinuationAsync(_searchContinuationToken, false);
+                    if (reqSeq != _navRequestSeq) return;
                     _searchContinuationToken = next.ContinuationToken ?? "";
                     _trackList.HasMoreItems = !string.IsNullOrEmpty(_searchContinuationToken);
                     if (next.Items != null && next.Items.Count > 0)

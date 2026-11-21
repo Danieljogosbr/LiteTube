@@ -33,6 +33,7 @@ namespace LiteTube
         private bool _isDisposed = false;
         private CancellationTokenSource _loadCts;
         private int _playSequence = 0;
+        private int _endedHandledSequence = -1;
         private DateTime _playStartUtc = DateTime.MinValue;
         private int _consecutiveInstantEnds = 0;
         private int _consecutiveFailures = 0;
@@ -102,7 +103,8 @@ namespace LiteTube
                 {
                     if (_player != null && _player.Status == FlyleafLib.MediaPlayer.Status.Ended)
                     {
-                        SafeDispatch(OnMediaEnded);
+                        int seq = Volatile.Read(ref _playSequence);
+                        SafeDispatch(() => OnMediaEnded(seq));
                     }
                 };
                 ApplyAudioSettingsToPlayer();
@@ -363,7 +365,19 @@ namespace LiteTube
                 });
             }
 
-            string source = await _ytService.GetPlayableSourceAsync(track, _config, token);
+            string source = null;
+            try
+            {
+                source = await _ytService.GetPlayableSourceAsync(track, _config, token);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch
+            {
+                source = null;
+            }
             if (token.IsCancellationRequested || seq != Volatile.Read(ref _playSequence) || _isDisposed) return;
 
             if (string.IsNullOrEmpty(source))
@@ -600,8 +614,9 @@ namespace LiteTube
             {
                 if (_isPlaying && _player.Status == FlyleafLib.MediaPlayer.Status.Ended)
                 {
+                    int seq = Volatile.Read(ref _playSequence);
                     _isPlaying = false;
-                    SafeDispatch(OnMediaEnded);
+                    SafeDispatch(() => OnMediaEnded(seq));
                     return;
                 }
 
@@ -628,10 +643,11 @@ namespace LiteTube
             catch { }
         }
 
-        private void OnMediaEnded()
+        private void OnMediaEnded(int expectedSeq)
         {
-            if (_currentIndex < 0 || _queue.Count == 0) return;
-            if (!_isPlaying && (_player != null && _player.Status != FlyleafLib.MediaPlayer.Status.Ended)) return;
+            if (_isDisposed || _currentIndex < 0 || _queue.Count == 0) return;
+            if (expectedSeq != Volatile.Read(ref _playSequence)) return;
+            if (Interlocked.Exchange(ref _endedHandledSequence, expectedSeq) == expectedSeq) return;
             _isPlaying = false;
 
             double elapsedSec = (DateTime.UtcNow - _playStartUtc).TotalSeconds;
@@ -657,11 +673,13 @@ namespace LiteTube
 
             if ((RepeatMode)_config.Repeat == RepeatMode.RepeatOne && _currentIndex >= 0)
             {
+                Interlocked.Exchange(ref _endedHandledSequence, -1);
                 _playStartUtc = DateTime.UtcNow;
                 SeekToSeconds(0);
                 if (_player != null)
                 {
-                    _player.Play();
+                    var p = _player;
+                    Task.Run(() => { try { p.Play(); } catch { } });
                     _isPlaying = true;
                     if (PlaybackStateChanged != null) SafeDispatch(delegate { PlaybackStateChanged(_isPlaying, _isLoading); });
                 }
@@ -679,6 +697,7 @@ namespace LiteTube
         {
             if (_isDisposed) return;
             _isDisposed = true;
+            Interlocked.Increment(ref _playSequence);
 
             if (_stateMonitorTimer != null)
             {
@@ -691,12 +710,27 @@ namespace LiteTube
                 _loadCts = null;
             }
 
-            StopCurrentPlaybackInternal();
-
-            if (_player != null)
+            var p = _player;
+            _player = null;
+            if (p != null)
             {
-                try { _player.Dispose(); } catch { }
-                _player = null;
+                Task.Run(async () =>
+                {
+                    try
+                    {
+                        await _playerCmdLock.WaitAsync(1500).ConfigureAwait(false);
+                        try { p.Stop(); } catch { }
+                        try { p.Dispose(); } catch { }
+                    }
+                    catch
+                    {
+                        try { p.Dispose(); } catch { }
+                    }
+                    finally
+                    {
+                        try { _playerCmdLock.Release(); } catch { }
+                    }
+                });
             }
         }
     }

@@ -612,7 +612,7 @@ namespace LiteTube
             {
                 _config.IsVideoMuted = false;
             }
-            _config.Save();
+            _config.SaveDebounced();
             ApplyAudioSettings();
         }
 
@@ -897,13 +897,17 @@ namespace LiteTube
             try { _playbackTimer.Stop(); } catch { }
             try
             {
-                if (_player != null)
+                var p = _player;
+                _player = null;
+                if (p != null)
                 {
-                    _player.PlaybackStopped -= OnPlayerPlaybackStopped;
-                    _player.OpenCompleted -= OnPlayerOpenCompleted;
-                    _player.Stop();
-                    _player.Dispose();
-                    _player = null;
+                    p.PlaybackStopped -= OnPlayerPlaybackStopped;
+                    p.OpenCompleted -= OnPlayerOpenCompleted;
+                    _ = Task.Run(() =>
+                    {
+                        try { p.Stop(); } catch { }
+                        try { p.Dispose(); } catch { }
+                    });
                 }
             }
             catch { }

@@ -380,6 +380,31 @@ namespace LiteTube
             return new AppConfig();
         }
 
+        private System.Threading.CancellationTokenSource? _debouncedSaveCts;
+
+        public void SaveDebounced(int delayMs = 350)
+        {
+            lock (_saveLock)
+            {
+                try { _debouncedSaveCts?.Cancel(); _debouncedSaveCts?.Dispose(); } catch { }
+                var cts = new System.Threading.CancellationTokenSource();
+                _debouncedSaveCts = cts;
+                var token = cts.Token;
+                System.Threading.Tasks.Task.Run(async () =>
+                {
+                    try
+                    {
+                        await System.Threading.Tasks.Task.Delay(delayMs, token).ConfigureAwait(false);
+                        if (!token.IsCancellationRequested)
+                        {
+                            Save();
+                        }
+                    }
+                    catch { }
+                });
+            }
+        }
+
         public void Save()
         {
             lock (_saveLock)
@@ -395,11 +420,7 @@ namespace LiteTube
                     };
                     string json = JsonSerializer.Serialize(this, jsonOptions);
                     File.WriteAllText(tempPath, json);
-                    if (File.Exists(path))
-                    {
-                        File.Delete(path);
-                    }
-                    File.Move(tempPath, path);
+                    File.Move(tempPath, path, overwrite: true);
                 }
                 catch { }
             }
