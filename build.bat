@@ -1,36 +1,20 @@
 @echo off
 chcp 65001 >nul
-title LiteTube [.NET 8 LTS / FlyleafLib / Direct3D 11]
+title LiteTube 2.0 [100% Rust Nativo / LibVLC]
 
-set DOTNET_ROOT=C:\Users\azeve\.gemini\antigravity\scratch\.dotnet
-if exist "%DOTNET_ROOT%\dotnet.exe" (
-    set "DOTNET=%DOTNET_ROOT%\dotnet.exe"
-    set "PATH=%DOTNET_ROOT%;%PATH%"
-) else (
-    set "DOTNET=dotnet"
-)
-
-echo Compilando LiteTube [.NET 8 LTS (net8.0-windows) - FlyleafLib / Direct3D 11]...
+echo Compilando LiteTube 2.0 [100%% Rust Nativo / LibVLC]...
 if exist "%~dp0LiteTube.old.exe" del /f /q "%~dp0LiteTube.old.exe" >nul 2>&1
-if exist "%~dp0LiteTube.old.dll" del /f /q "%~dp0LiteTube.old.dll" >nul 2>&1
-if exist "%~dp0LiteTube.exe" move /y "%~dp0LiteTube.exe" "%~dp0LiteTube.old.exe" >nul 2>&1
-if exist "%~dp0LiteTube.dll" move /y "%~dp0LiteTube.dll" "%~dp0LiteTube.old.dll" >nul 2>&1
 
-"%DOTNET%" build "%~dp0LiteTube.csproj" -c Release -p:Platform=x64 --nologo
+cargo build --release --manifest-path "%~dp0Cargo.toml"
 
 if %ERRORLEVEL% EQU 0 (
-    echo [SUCESSO] LiteTube [.NET 8 LTS] compilado com 0 erros!
-    echo Sincronizando binarios para a raiz do aplicativo...
-    xcopy /y /e /q "%~dp0bin\x64\Release\net8.0-windows7.0\*" "%~dp0." >nul 2>&1
-    copy /y "%~dp0bin\x64\Release\net8.0-windows7.0\LiteTube.exe" "%~dp0." >nul 2>&1
-    copy /y "%~dp0bin\x64\Release\net8.0-windows7.0\LiteTube.dll" "%~dp0." >nul 2>&1
-    copy /y "%~dp0bin\x64\Release\net8.0-windows7.0\LiteTube.deps.json" "%~dp0." >nul 2>&1
-    copy /y "%~dp0bin\x64\Release\net8.0-windows7.0\LiteTube.runtimeconfig.json" "%~dp0." >nul 2>&1
+    echo [SUCESSO] LiteTube 2.0 [Rust] compilado com 0 erros!
+    echo Sincronizando LiteTube.exe para a raiz do aplicativo...
+    if exist "%~dp0LiteTube.exe" move /y "%~dp0LiteTube.exe" "%~dp0LiteTube.old.exe" >nul 2>&1
+    copy /y "%~dp0target\release\LiteTube.exe" "%~dp0LiteTube.exe" >nul 2>&1
     if exist "%~dp0LiteTube.old.exe" del /f /q "%~dp0LiteTube.old.exe" >nul 2>&1
-    if exist "%~dp0LiteTube.old.dll" del /f /q "%~dp0LiteTube.old.dll" >nul 2>&1
-    echo [PRONTO] LiteTube.exe e dependencias .NET 8 atualizados na raiz com sucesso!
+    echo [PRONTO] LiteTube.exe (Rust) atualizado na raiz com sucesso!
 ) else (
-    echo [ERRO] Falha na compilacao do LiteTube [.NET 8 LTS]!
-    if exist "%~dp0LiteTube.old.exe" move /y "%~dp0LiteTube.old.exe" "%~dp0LiteTube.exe" >nul 2>&1
-    if exist "%~dp0LiteTube.old.dll" move /y "%~dp0LiteTube.old.dll" "%~dp0LiteTube.dll" >nul 2>&1
+    echo [ERRO] Falha na compilacao do LiteTube 2.0 [Rust]!
+    exit /b 1
 )

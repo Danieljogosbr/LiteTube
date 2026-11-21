@@ -6,6 +6,7 @@ logs/
 bin/yt-dlp.lastupdate
 
 # Arquivos e pastas de compilação temporários e depuração
+target/
 bin/Debug/
 bin/Release/
 bin/x64/
