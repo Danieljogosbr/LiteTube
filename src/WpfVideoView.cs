@@ -72,6 +72,9 @@ namespace LiteTube
 
         // Watch Page controls
         private ScrollViewer _watchPageScroll = null!;
+        private Grid _theaterStageContainer = null!;
+        private Grid _watchTwoColumnGrid = null!;
+        private Grid _normalStageContainer = null!;
         private Border _playerStageFrame = null!;
         private Grid _playerHostContainer = null!;
         private StackPanel _watchMetadataPanel = null!;
@@ -99,6 +102,7 @@ namespace LiteTube
         // View state
         private bool _sidebarExpanded = true;
         private bool _isFullscreen = false;
+        private bool _isTheaterMode = false;
         private bool _initialHomeLoaded = false;
         private bool _isDescriptionExpanded = false;
         private bool _isChannelView = false;
@@ -220,6 +224,9 @@ namespace LiteTube
             _catalogGridHost = (ContentControl)root.FindName("CatalogGridHost");
 
             _watchPageScroll = (ScrollViewer)root.FindName("WatchPageScroll");
+            _theaterStageContainer = (Grid)root.FindName("TheaterStageContainer");
+            _watchTwoColumnGrid = (Grid)root.FindName("WatchTwoColumnGrid");
+            _normalStageContainer = (Grid)root.FindName("NormalStageContainer");
             _playerStageFrame = (Border)root.FindName("PlayerStageFrame");
             _playerHostContainer = (Grid)root.FindName("PlayerHostContainer");
             _watchMetadataPanel = (StackPanel)root.FindName("WatchMetadataPanel");
@@ -249,10 +256,11 @@ namespace LiteTube
             _catalogGrid.SetAccentColor(255, 0, 51);
             _catalogGridHost.Content = _catalogGrid;
 
-            // Grade 4 colunas de recomendados na Watch Page
+            // Barra lateral direita de recomendados (402px, cards compactos 168x94 estilo YouTube)
             _relatedGrid = new WpfMediaListControl
             {
-                IsGridMode = true,
+                IsGridMode = false,
+                IsCompactSidebarMode = true,
                 IsEmbeddedWatchGrid = true,
                 IsMusicEnvironment = false,
                 SingleClickActivates = true,
@@ -266,6 +274,8 @@ namespace LiteTube
             _wpfOverlay.UpdateAudioVisuals(_config.VideoVolume, _config.IsVideoMuted);
             _wpfOverlay.UpdateQualityAndSpeedVisuals(_config.VideoQualityHeight, 1.0);
             _wpfOverlay.SetOverlayActive(false);
+            _isTheaterMode = _config.IsTheaterMode;
+            ApplyTheaterModeLayout(_isTheaterMode);
 
             _loadingOverlay = new Border
             {
@@ -406,6 +416,13 @@ namespace LiteTube
             _lblVideoChannel.MouseLeftButtonUp += (s, e) => OpenCurrentVideoChannel();
             _btnOpenCurrentChannel.Click += (s, e) => OpenCurrentVideoChannel();
             _btnToggleDescription.Click += (s, e) => ToggleDescriptionExpanded();
+            _descriptionContainer.MouseLeftButtonUp += (s, e) =>
+            {
+                if (!_isDescriptionExpanded && !(e.OriginalSource is Hyperlink))
+                {
+                    ToggleDescriptionExpanded();
+                }
+            };
             _btnCancelLoad.Click += (s, e) => _controller.CancelLoad();
 
             // Eventos do HUD WPF
@@ -417,6 +434,7 @@ namespace LiteTube
             _wpfOverlay.VolumeChanged += vol => _controller.SetVolume(vol);
             _wpfOverlay.QualityChanged += async q => await _controller.SwitchQualityAsync(q);
             _wpfOverlay.SpeedChanged += spd => _controller.SetSpeed(spd);
+            _wpfOverlay.TheaterModeToggleRequested += () => ToggleTheaterMode(!_isTheaterMode);
             _wpfOverlay.FullscreenToggleRequested += () => ToggleFullscreen(!_isFullscreen);
             _wpfOverlay.ShortcutKeyPressed += HandlePlayerShortcutKey;
             _wpfOverlay.UnhandledMouseWheel += delta => ScrollWatchPageByDelta(delta);
@@ -456,9 +474,12 @@ namespace LiteTube
                 _currentSubscriberCountText = "";
                 _lblVideoSubInfo.Text = string.Format("Carregando canal  •  {0}p", _config.VideoQualityHeight);
                 _isDescriptionExpanded = false;
-                _descriptionContainer.Visibility = Visibility.Collapsed;
+                _txtVideoDescription.MaxHeight = 42.0;
+                _txtVideoDescription.Inlines.Clear();
+                _txtVideoDescription.Inlines.Add(new Run("Carregando descrição..."));
+                _descriptionContainer.Cursor = Cursors.Hand;
                 _lastDescriptionRaw = "";
-                _btnToggleDescription.Content = "Descrição";
+                _btnToggleDescription.Content = "...mais";
 
                 LoadWatchChannelAvatarAsync(video);
                 StartBackgroundVideoMetadataFetch(video);
@@ -899,6 +920,57 @@ namespace LiteTube
             UpdateSidebarSelection();
         }
 
+        public void ToggleTheaterMode(bool enable)
+        {
+            if (_isFullscreen)
+            {
+                ToggleFullscreen(false);
+            }
+            if (_isTheaterMode == enable) return;
+            _isTheaterMode = enable;
+            _config.IsTheaterMode = enable;
+            _config.SaveDebounced();
+
+            ApplyTheaterModeLayout(enable);
+            UpdateWatchStageDimensions();
+            _wpfOverlay.ShowOsd(enable ? "Modo Teatro" : "Modo Padrão");
+            _wpfOverlay.ForceImmediateGpuRender();
+        }
+
+        private void ApplyTheaterModeLayout(bool theater)
+        {
+            if (_playerStageFrame == null || _theaterStageContainer == null || _normalStageContainer == null)
+                return;
+
+            _wpfOverlay.IsTheaterMode = theater;
+
+            // Move o PlayerStageFrame entre o palco full-bleed (Teatro) e a coluna esquerda (Padrão)
+            // sem recriar o FlyleafHost e sem interromper 1 único frame do vídeo
+            if (_theaterStageContainer.Children.Contains(_playerStageFrame))
+                _theaterStageContainer.Children.Remove(_playerStageFrame);
+            if (_normalStageContainer.Children.Contains(_playerStageFrame))
+                _normalStageContainer.Children.Remove(_playerStageFrame);
+
+            if (theater)
+            {
+                _playerStageFrame.CornerRadius = new CornerRadius(0);
+                _theaterStageContainer.Children.Add(_playerStageFrame);
+                _theaterStageContainer.Visibility = Visibility.Visible;
+                _normalStageContainer.Visibility = Visibility.Collapsed;
+                if (_watchTwoColumnGrid != null)
+                    _watchTwoColumnGrid.Margin = new Thickness(24, 14, 24, 32);
+            }
+            else
+            {
+                _playerStageFrame.CornerRadius = new CornerRadius(12);
+                _normalStageContainer.Children.Add(_playerStageFrame);
+                _normalStageContainer.Visibility = Visibility.Visible;
+                _theaterStageContainer.Visibility = Visibility.Collapsed;
+                if (_watchTwoColumnGrid != null)
+                    _watchTwoColumnGrid.Margin = new Thickness(24, 12, 24, 32);
+            }
+        }
+
         public void ToggleFullscreen(bool enable)
         {
             if (_isFullscreen == enable) return;
@@ -968,6 +1040,9 @@ namespace LiteTube
                 case Key.M:
                     _controller.ToggleMute();
                     _wpfOverlay.ShowOsd(_config.IsVideoMuted ? "🔇 Mudo" : "🔊 Som");
+                    break;
+                case Key.T:
+                    ToggleTheaterMode(!_isTheaterMode);
                     break;
                 case Key.F:
                     ToggleFullscreen(!_isFullscreen);
@@ -1269,8 +1344,9 @@ namespace LiteTube
         private void ToggleDescriptionExpanded()
         {
             _isDescriptionExpanded = !_isDescriptionExpanded;
-            _descriptionContainer.Visibility = _isDescriptionExpanded ? Visibility.Visible : Visibility.Collapsed;
-            _btnToggleDescription.Content = _isDescriptionExpanded ? "Ocultar descrição" : "Descrição";
+            _txtVideoDescription.MaxHeight = _isDescriptionExpanded ? double.PositiveInfinity : 42.0;
+            _descriptionContainer.Cursor = _isDescriptionExpanded ? Cursors.Arrow : Cursors.Hand;
+            _btnToggleDescription.Content = _isDescriptionExpanded ? "Mostrar menos" : "...mais";
             if (_isDescriptionExpanded && _txtVideoDescription.Inlines.Count == 0)
             {
                 RenderDescriptionWithTimestamps(_lastDescriptionRaw);
@@ -1393,18 +1469,30 @@ namespace LiteTube
         {
             if (_isFullscreen || _watchPageScroll.Visibility != Visibility.Visible) return;
 
-            double availW = Math.Max(480, Math.Min(1352, _watchPageScroll.ActualWidth - 52));
-            double availH = Math.Max(420, _watchPageScroll.ActualHeight);
+            double viewportW = Math.Max(640, _watchPageScroll.ActualWidth);
+            double viewportH = Math.Max(420, _watchPageScroll.ActualHeight);
 
-            double idealH = Math.Round(availW * 9.0 / 16.0);
-            double maxH = Math.Max(320, availH - 135);
-            double finalH = Math.Min(idealH, maxH);
-
-            _playerStageFrame.Height = finalH;
+            if (_isTheaterMode)
+            {
+                // Fórmula oficial YouTube Theater Mode (#full-bleed-container):
+                // height: 56.25vw (16:9), max-height: calc(100vh - 169px) -> viewportH já desconta 56px do topo -> viewportH - 113px
+                double idealH = Math.Round(viewportW * 9.0 / 16.0);
+                double maxTheaterH = Math.Max(420, viewportH - 113);
+                _playerStageFrame.Height = Math.Min(idealH, maxTheaterH);
+            }
+            else
+            {
+                // Layout oficial 2 colunas YouTube: MaxWidth 1754px, margens 24px+24px, gap 24px, sidebar direita 402px
+                double contentW = Math.Min(1754, Math.Max(640, viewportW - 48));
+                double primaryW = Math.Max(460, contentW - 402 - 24);
+                double idealH = Math.Round(primaryW * 9.0 / 16.0);
+                double maxNormalH = Math.Max(340, viewportH - 150);
+                _playerStageFrame.Height = Math.Min(idealH, maxNormalH);
+            }
 
             if (_relatedGrid != null)
             {
-                double embH = _relatedGrid.ComputeEmbeddedGridHeight(availW + 12);
+                double embH = _relatedGrid.ComputeEmbeddedGridHeight(402);
                 _relatedGrid.Height = Math.Max(320, embH);
             }
         }

@@ -352,7 +352,7 @@ namespace LiteTube
             {
                 Key key = e.Key == Key.System ? e.SystemKey : e.Key;
                 if (key == Key.Space || key == Key.K || key == Key.J || key == Key.L ||
-                    key == Key.Left || key == Key.Right || key == Key.M || key == Key.F ||
+                    key == Key.Left || key == Key.Right || key == Key.M || key == Key.T || key == Key.F ||
                     key == Key.Escape || key == Key.Up || key == Key.Down)
                 {
                     _videoView.HandlePlayerShortcutKey(key);

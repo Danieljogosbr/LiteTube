@@ -333,7 +333,7 @@
             <ContentControl x:Name="CatalogGridHost" Grid.Row="3" Margin="6,0,6,0"/>
         </Grid>
 
-        <!-- VIEW 2: WATCH PAGE (YOUTUBE CINEMA STAGE + 4-COLUMN RECOMMENDED) -->
+        <!-- VIEW 2: WATCH PAGE (YOUTUBE 2-COLUMN DEFAULT + FULL-BLEED THEATER MODE) -->
         <ScrollViewer x:Name="WatchPageScroll" Visibility="Collapsed"
                       VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
                       Background="#0F0F0F">
@@ -341,62 +341,71 @@
                 <Style TargetType="ScrollBar" BasedOn="{StaticResource DarkThinScrollBar}"/>
             </ScrollViewer.Resources>
 
-            <Grid x:Name="WatchContentRoot" MaxWidth="1400" Margin="24,10,24,28">
-                <StackPanel x:Name="WatchStageStack">
-                    <!-- 16:9 Video Player Stage -->
-                    <Border x:Name="PlayerStageFrame" Background="#000000" CornerRadius="12" ClipToBounds="True" Height="560">
-                        <Grid x:Name="PlayerHostContainer"/>
-                    </Border>
+            <StackPanel x:Name="WatchRootStack">
+                <!-- FULL-BLEED THEATER STAGE (#000000, 100% width, visible only in Theater Mode) -->
+                <Grid x:Name="TheaterStageContainer" Background="#000000" Visibility="Collapsed" HorizontalAlignment="Stretch"/>
 
-                    <!-- Video Metadata Header (Clean YouTube Layout: No likes/comments/subscribe) -->
-                    <StackPanel x:Name="WatchMetadataPanel" Margin="2,14,2,10">
-                        <!-- Row 1: Title + Views/Date -->
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="Auto"/>
-                            </Grid.ColumnDefinitions>
+                <!-- OFFICIAL YOUTUBE 2-COLUMN WATCH FLEX CONTAINER (Left: *, Gap: 24px, Right Sidebar: 402px) -->
+                <Grid x:Name="WatchTwoColumnGrid" MaxWidth="1754" Margin="24,14,24,32">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition x:Name="WatchPrimaryColumn" Width="*" MinWidth="460"/>
+                        <ColumnDefinition x:Name="WatchGapColumn" Width="24"/>
+                        <ColumnDefinition x:Name="WatchRightSidebarColumn" Width="402"/>
+                    </Grid.ColumnDefinitions>
 
-                            <TextBlock x:Name="LblVideoTitle" Grid.Column="0" Text=""
-                                       FontSize="19" FontWeight="Bold" Foreground="#F1F1F1"
-                                       TextWrapping="Wrap" MaxHeight="56" TextTrimming="CharacterEllipsis" Margin="0,0,16,0"/>
-
-                            <TextBlock x:Name="LblVideoViewsDate" Grid.Column="1" Text=""
-                                       FontSize="13" Foreground="#AAAAAA" VerticalAlignment="Top" Margin="0,4,0,0"/>
+                    <!-- LEFT PRIMARY COLUMN: Player (Normal Mode) + Title + Channel Row + Description Box -->
+                    <StackPanel Grid.Column="0" x:Name="WatchPrimaryStack">
+                        <!-- Normal Mode Player Container (16:9, CornerRadius 12px) -->
+                        <Grid x:Name="NormalStageContainer">
+                            <Border x:Name="PlayerStageFrame" Background="#000000" CornerRadius="12" ClipToBounds="True" Height="520">
+                                <Grid x:Name="PlayerHostContainer"/>
+                            </Border>
                         </Grid>
 
-                        <!-- Row 2: Channel Avatar + Name/Subs + Acessar Canal + Descrição Pill -->
-                        <Grid Margin="0,12,0,0">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="Auto"/>
-                                <ColumnDefinition Width="Auto"/>
-                                <ColumnDefinition Width="Auto"/>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="Auto"/>
-                            </Grid.ColumnDefinitions>
+                        <!-- Video Metadata Header (Clean YouTube Layout: No comments / likes / subscribe) -->
+                        <StackPanel x:Name="WatchMetadataPanel" Margin="0,12,0,0">
+                            <!-- Title -->
+                            <TextBlock x:Name="LblVideoTitle" Text=""
+                                       FontSize="20" FontWeight="Bold" Foreground="#F1F1F1"
+                                       TextWrapping="Wrap" LineHeight="26"/>
 
-                            <Ellipse x:Name="WatchChannelAvatar" Grid.Column="0" Width="38" Height="38" Fill="#2A2A2A" Cursor="Hand" Margin="0,0,12,0"/>
+                            <!-- Channel Avatar (40x40) + Name/Subs + Acessar Canal -->
+                            <Grid Margin="0,12,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
 
-                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,16,0">
-                                <TextBlock x:Name="LblVideoChannel" Text="Canal" FontSize="14.5" FontWeight="Bold" Foreground="#F1F1F1" Cursor="Hand"/>
-                                <TextBlock x:Name="LblVideoSubInfo" Text="" FontSize="12" Foreground="#AAAAAA" Margin="0,1,0,0"/>
-                            </StackPanel>
+                                <Ellipse x:Name="WatchChannelAvatar" Grid.Column="0" Width="40" Height="40" Fill="#2A2A2A" Cursor="Hand" Margin="0,0,12,0"/>
 
-                            <Button x:Name="BtnOpenCurrentChannel" Grid.Column="2" Content="Acessar Canal" Style="{StaticResource WhitePillButton}" VerticalAlignment="Center"/>
+                                <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,12,0">
+                                    <TextBlock x:Name="LblVideoChannel" Text="Canal" FontSize="15" FontWeight="Bold" Foreground="#F1F1F1" Cursor="Hand" TextTrimming="CharacterEllipsis"/>
+                                    <TextBlock x:Name="LblVideoSubInfo" Text="" FontSize="12" Foreground="#AAAAAA" Margin="0,1,0,0" TextTrimming="CharacterEllipsis"/>
+                                </StackPanel>
 
-                            <Button x:Name="BtnToggleDescription" Grid.Column="4" Content="Descrição" Style="{StaticResource PillChipButton}" Margin="0" VerticalAlignment="Center"/>
-                        </Grid>
+                                <Button x:Name="BtnOpenCurrentChannel" Grid.Column="2" Content="Acessar Canal" Style="{StaticResource WhitePillButton}" VerticalAlignment="Center"/>
+                            </Grid>
 
-                        <!-- Expandable Description Box with Clickable Timestamps -->
-                        <Border x:Name="DescriptionContainer" Background="#1F1F1F" CornerRadius="12" Padding="14,12" Margin="0,12,0,0" Visibility="Collapsed">
-                            <TextBlock x:Name="TxtVideoDescription" Foreground="#E4E4E7" FontSize="13" LineHeight="20" TextWrapping="Wrap"/>
-                        </Border>
+                            <!-- Always-Visible YouTube Description Box (Compact preview -> Expandable with clickable timestamps) -->
+                            <Border x:Name="DescriptionContainer" Background="#272727" CornerRadius="12" Padding="14,12" Margin="0,12,0,0" Cursor="Hand">
+                                <StackPanel>
+                                    <TextBlock x:Name="LblVideoViewsDate" Text=""
+                                               FontSize="13" FontWeight="SemiBold" Foreground="#F1F1F1" Margin="0,0,0,6"/>
+                                    <TextBlock x:Name="TxtVideoDescription" Foreground="#E4E4E7" FontSize="13" LineHeight="20"
+                                               TextWrapping="Wrap" MaxHeight="42" TextTrimming="CharacterEllipsis"/>
+                                    <Button x:Name="BtnToggleDescription" Content="...mais" HorizontalAlignment="Left"
+                                            Background="Transparent" Foreground="#F1F1F1" FontSize="13" FontWeight="SemiBold"
+                                            BorderThickness="0" Padding="0,6,8,0" Cursor="Hand"/>
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
                     </StackPanel>
 
-                    <!-- Recommended Videos 4-Column Grid -->
-                    <ContentControl x:Name="RelatedGridHost" Margin="-6,10,-6,0"/>
-                </StackPanel>
-            </Grid>
+                    <!-- RIGHT SECONDARY SIDEBAR (402px): Vertical Compact Recommended Videos (168x94) -->
+                    <ContentControl x:Name="RelatedGridHost" Grid.Column="2" VerticalAlignment="Top"/>
+                </Grid>
+            </StackPanel>
         </ScrollViewer>
 
         <!-- FULLSCREEN VIDEO CONTAINER (100% viewport when Fullscreen is active) -->

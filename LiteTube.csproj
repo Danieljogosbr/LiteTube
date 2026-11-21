@@ -24,10 +24,10 @@
     <Description>LiteTube - Player leve e moderno para YouTube e YouTube Music</Description>
     <Company>LiteTube</Company>
     <Copyright>Copyright © 2026</Copyright>
-    <Version>1.5.0</Version>
-    <AssemblyVersion>1.5.0.0</AssemblyVersion>
-    <FileVersion>1.5.0.0</FileVersion>
-    <InformationalVersion>1.5.0</InformationalVersion>
+    <Version>1.6.0</Version>
+    <AssemblyVersion>1.6.0.0</AssemblyVersion>
+    <FileVersion>1.6.0.0</FileVersion>
+    <InformationalVersion>1.6.0</InformationalVersion>
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
     <EnableDefaultApplicationDefinition>false</EnableDefaultApplicationDefinition>
     <EnableDefaultPageItems>false</EnableDefaultPageItems>
@@ -74,4 +74,13 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
+
+  <Target Name="SyncReleaseBinariesToRoot" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
+    <ItemGroup>
+      <_RootSyncBinaries Include="$(TargetDir)LiteTube.exe;$(TargetDir)LiteTube.dll;$(TargetDir)LiteTube.deps.json;$(TargetDir)LiteTube.runtimeconfig.json" />
+      <_RootSyncXamls Include="$(MSBuildProjectDirectory)\src\*.xaml" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_RootSyncBinaries)" DestinationFolder="$(MSBuildProjectDirectory)" SkipUnchangedFiles="true" ContinueOnError="WarnAndContinue" />
+    <Copy SourceFiles="@(_RootSyncXamls)" DestinationFolder="$(MSBuildProjectDirectory)" SkipUnchangedFiles="true" ContinueOnError="WarnAndContinue" />
+  </Target>
 </Project>

@@ -6,7 +6,7 @@
   "compilationOptions": {},
   "targets": {
     ".NETCoreApp,Version=v8.0": {
-      "LiteTube/1.5.0": {
+      "LiteTube/1.6.0": {
         "dependencies": {
           "FlyleafLib": "3.7.55",
           "Microsoft.Web.WebView2": "1.0.4314.35",
@@ -307,7 +307,7 @@
     }
   },
   "libraries": {
-    "LiteTube/1.5.0": {
+    "LiteTube/1.6.0": {
       "type": "project",
       "serviceable": false,
       "sha512": ""

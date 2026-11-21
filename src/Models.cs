@@ -260,6 +260,7 @@ namespace LiteTube
         public bool HideShorts { get; set; }
         public bool EnableSponsorBlock { get; set; }
         public bool AutoSkipSponsors { get; set; }
+        public bool IsTheaterMode { get; set; }
 
         public List<TrackItem> Favorites { get; set; }
         public List<TrackItem> SavedVideos { get; set; }

@@ -96,6 +96,9 @@ namespace LiteTube
         private Border _btnSpeedPill;
         private TextBlock _txtSpeedBadge;
         private Border _btnSettingsGear;
+        private Border _btnTheaterMode;
+        private System.Windows.Shapes.Path _iconTheaterEnter;
+        private System.Windows.Shapes.Path _iconTheaterExit;
         private Border _btnFullscreen;
         private Canvas _chaptersCanvas;
         private TextBlock _scrubberChapterText;
@@ -163,13 +166,39 @@ namespace LiteTube
         public event Action<double> VolumeChanged;
         public event Action<int> QualityChanged;
         public event Action<double> SpeedChanged;
+        public event Action TheaterModeToggleRequested;
         public event Action FullscreenToggleRequested;
         public event Action AudioDialogRequested;
         public event Action<Key> ShortcutKeyPressed;
         public event Action<int> UnhandledMouseWheel;
 
+        private bool _isFullscreenMode;
+        private bool _isTheaterMode;
+
         public bool IsUserDraggingScrubber { get { return _isDraggingScrubber; } }
-        public bool IsFullscreenMode { get; set; }
+        public bool IsFullscreenMode
+        {
+            get { return _isFullscreenMode; }
+            set
+            {
+                _isFullscreenMode = value;
+                if (_btnTheaterMode != null)
+                {
+                    _btnTheaterMode.Visibility = value ? Visibility.Collapsed : Visibility.Visible;
+                }
+            }
+        }
+        public bool IsTheaterMode
+        {
+            get { return _isTheaterMode; }
+            set
+            {
+                _isTheaterMode = value;
+                if (_iconTheaterEnter != null) _iconTheaterEnter.Visibility = value ? Visibility.Collapsed : Visibility.Visible;
+                if (_iconTheaterExit != null) _iconTheaterExit.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
+                if (_btnTheaterMode != null) _btnTheaterMode.ToolTip = value ? "Modo Padrão (T)" : "Modo Teatro (T)";
+            }
+        }
         public bool IsOverlayVisible { get { return _isOverlayAttachedAndActive && _rootContent != null && _rootContent.Visibility == Visibility.Visible; } }
         public FrameworkElement View { get { return _rootContent; } }
 
@@ -296,6 +325,9 @@ namespace LiteTube
             _btnSpeedPill = FindElement<Border>("BtnSpeedPill");
             _txtSpeedBadge = FindElement<TextBlock>("TxtSpeedBadge");
             _btnSettingsGear = FindElement<Border>("BtnSettingsGear");
+            _btnTheaterMode = FindElement<Border>("BtnTheaterMode");
+            _iconTheaterEnter = FindElement<System.Windows.Shapes.Path>("IconTheaterEnter");
+            _iconTheaterExit = FindElement<System.Windows.Shapes.Path>("IconTheaterExit");
             _btnFullscreen = FindElement<Border>("BtnFullscreen");
 
             _gearQualityGrid = FindElement<UniformGrid>("GearQualityGrid");
@@ -465,10 +497,11 @@ namespace LiteTube
                 };
             }
 
-            // Settings Gear, Quality Pill, Speed Pill & Fullscreen
+            // Settings Gear, Quality Pill, Speed Pill, Theater Mode & Fullscreen
             WireButton(_btnSettingsGear, () => ToggleGearPopup());
             WireButton(_badgeQualityPill, () => ToggleGearPopup());
             WireButton(_btnSpeedPill, () => ToggleGearPopup());
+            WireButton(_btnTheaterMode, () => { if (TheaterModeToggleRequested != null) TheaterModeToggleRequested(); });
             WireButton(_btnFullscreen, () => { if (FullscreenToggleRequested != null) FullscreenToggleRequested(); });
 
             // Gear Menu Actions

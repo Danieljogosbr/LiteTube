@@ -260,6 +260,11 @@ namespace LiteTube
 
         public int ComputeEmbeddedGridHeight(double usableWidth)
         {
+            if (_isCompactSidebarMode && !_isGridMode)
+            {
+                if (_viewModels.Count == 0) return 220;
+                return Math.Max(320, (_viewModels.Count * 110) + 28);
+            }
             if (!_isGridMode || _viewModels.Count == 0) return 220;
             double effectiveW = Math.Max(320, usableWidth - 20);
             int cols = CalculateColumnCount(effectiveW);
@@ -407,7 +412,7 @@ namespace LiteTube
                 _items.AddRange(items);
             }
 
-            int defaultDecodeW = (_isMusicEnvironment && !_isGridMode) ? 120 : (_isCompactSidebarMode ? 160 : 320);
+            int defaultDecodeW = (_isMusicEnvironment && !_isGridMode) ? 120 : (_isCompactSidebarMode ? 200 : 320);
             bool needChannelAvatars = _isGridMode && !_isMusicEnvironment;
 
             for (int i = 0; i < _items.Count; i++)
@@ -462,7 +467,7 @@ namespace LiteTube
             int added = 0;
             var newVms = new List<TrackItemViewModel>();
 
-            int defaultDecodeW = (_isMusicEnvironment && !_isGridMode) ? 120 : (_isCompactSidebarMode ? 160 : 320);
+            int defaultDecodeW = (_isMusicEnvironment && !_isGridMode) ? 120 : (_isCompactSidebarMode ? 200 : 320);
             bool needChannelAvatars = _isGridMode && !_isMusicEnvironment;
 
             for (int i = 0; i < moreItems.Count; i++)
