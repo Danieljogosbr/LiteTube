@@ -18,17 +18,19 @@ use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
     PIPE_WAIT,
 };
-use windows::Win32::System::ProcessStatus::{K32EmptyWorkingSet, K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+use windows::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey,
     RegCreateKeyExW, RegSetValueExW,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId};
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowThreadProcessId, IsIconic, IsWindowVisible, SW_RESTORE,
-    SetForegroundWindow, ShowWindow,
+    EnumWindows, GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow,
+    IsWindowVisible, SW_RESTORE, SetForegroundWindow, ShowWindow,
 };
 use windows_core::{BOOL, PCWSTR};
+
+static CACHED_MAIN_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
 #[repr(C)]
 #[derive(Default)]
@@ -76,11 +78,68 @@ pub fn get_current_ram_usage_mb() -> f64 {
     0.0
 }
 
-/// Compacta o Working Set do processo nativo Rust no Windows.
+/// Compacta recursos sem despejar o Working Set do driver OpenGL/WGL (evita tela preta ou
+/// congelamento ao restaurar a janela após reprodução prolongada em segundo plano).
 pub fn trim_memory() {
+    // Intencionalmente não invoca K32EmptyWorkingSet durante a execução da UI, pois
+    // forçar page-out do driver OpenGL/WGL (nvoglv64/AMD/Intel) congela o SwapBuffers ao voltar do background.
+}
+
+fn resolve_main_process_hwnd() -> Option<HWND> {
+    let cached = CACHED_MAIN_HWND.load(std::sync::atomic::Ordering::Acquire);
+    if cached != 0 {
+        let h = HWND(cached as *mut std::ffi::c_void);
+        if unsafe { IsWindow(Some(h)).as_bool() } {
+            return Some(h);
+        }
+        CACHED_MAIN_HWND.store(0, std::sync::atomic::Ordering::Release);
+    }
+
+    unsafe extern "system" fn find_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        unsafe {
+            let target_pid = lparam.0 as u32;
+            let mut win_pid = 0u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut win_pid));
+            if win_pid == target_pid && IsWindowVisible(hwnd).as_bool() {
+                CACHED_MAIN_HWND.store(hwnd.0 as isize, std::sync::atomic::Ordering::Release);
+                return BOOL(0);
+            }
+            BOOL(1)
+        }
+    }
+
     unsafe {
-        let proc = GetCurrentProcess();
-        let _ = K32EmptyWorkingSet(proc);
+        let pid = GetCurrentProcessId();
+        let _ = EnumWindows(Some(find_cb), LPARAM(pid as isize));
+    }
+    let found = CACHED_MAIN_HWND.load(std::sync::atomic::Ordering::Acquire);
+    if found != 0 {
+        Some(HWND(found as *mut std::ffi::c_void))
+    } else {
+        None
+    }
+}
+
+/// Retorna `true` se a janela principal do LiteTube estiver minimizada na barra de tarefas (`IsIconic`).
+pub fn is_current_process_window_minimized() -> bool {
+    if let Some(hwnd) = resolve_main_process_hwnd() {
+        unsafe { IsIconic(hwnd).as_bool() }
+    } else {
+        false
+    }
+}
+
+/// Retorna `true` se a janela principal do LiteTube estiver em primeiro plano (ativa no foco do Windows).
+pub fn is_current_process_window_foreground() -> bool {
+    if let Some(hwnd) = resolve_main_process_hwnd() {
+        unsafe {
+            if IsIconic(hwnd).as_bool() {
+                return false;
+            }
+            GetForegroundWindow() == hwnd
+        }
+    } else {
+        true
     }
 }
 
@@ -93,6 +152,7 @@ pub fn apply_dark_title_bar_to_current_process() {
             let mut win_pid = 0u32;
             GetWindowThreadProcessId(hwnd, Some(&mut win_pid));
             if win_pid == target_pid && IsWindowVisible(hwnd).as_bool() {
+                CACHED_MAIN_HWND.store(hwnd.0 as isize, std::sync::atomic::Ordering::Release);
                 let dark: i32 = 1;
                 let caption_color: u32 = 0x000F0F0F; // COLORREF #0F0F0F
                 let text_color: u32 = 0x00F1F1F1;    // COLORREF #F1F1F1

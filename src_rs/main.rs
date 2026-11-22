@@ -23,7 +23,8 @@ use crate::auth::{
 use crate::media::{RustMediaPlayer, linear_to_vlc_volume};
 use crate::memory::{
     apply_dark_title_bar_to_current_process, bring_current_process_window_to_front,
-    get_current_ram_usage_mb, init_logger, log_error, log_info, register_litetube_protocol,
+    get_current_ram_usage_mb, init_logger, is_current_process_window_foreground,
+    is_current_process_window_minimized, log_error, log_info, register_litetube_protocol,
     sanitize_sensitive_data, start_ipc_pipe_server, trim_memory, try_send_ipc_play_url,
 };
 use crate::models::{
@@ -384,6 +385,8 @@ struct MusicBgState {
     play_req_seq: u64,
     ended_handled_seq: u64,
     is_resolving: bool,
+    track_started_playing: bool,
+    last_open_instant: Option<Instant>,
     shuffle: bool,
     repeat_mode: RepeatMode,
     volume: f64,
@@ -393,6 +396,12 @@ struct MusicBgState {
     sponsors: Vec<SponsorSegment>,
     last_skipped_sponsor_uuid: String,
     config_snapshot: AppConfig,
+}
+
+fn request_repaint_if_window_visible(ctx: &egui::Context) {
+    if !is_current_process_window_minimized() {
+        ctx.request_repaint();
+    }
 }
 
 fn spawn_music_resolve_and_play(
@@ -415,13 +424,10 @@ fn spawn_music_resolve_and_play(
         };
 
         let (still_current, vol, muted) = {
-            let mut st = bg.lock().unwrap_or_else(|e| e.into_inner());
+            let st = bg.lock().unwrap_or_else(|e| e.into_inner());
             if st.play_req_seq != req_id {
                 return;
             }
-            st.is_resolving = false;
-            st.sponsors = segs.clone();
-            st.last_skipped_sponsor_uuid.clear();
             (true, st.volume, st.is_muted)
         };
         if !still_current {
@@ -430,8 +436,20 @@ fn spawn_music_resolve_and_play(
 
         match res {
             Ok(url) => {
-                // Abre e inicia a reprodução DIRETO na thread de fundo — não depende de eframe::App::update()!
+                // Mantém `is_resolving = true` durante `open_and_play` para que o supervisor
+                // nunca confunda o estado anterior do LibVLC com fim da nova faixa!
                 let ok = player.open_and_play(&url, None, 0.0, vol, muted);
+                {
+                    let mut st = bg.lock().unwrap_or_else(|e| e.into_inner());
+                    if st.play_req_seq != req_id {
+                        return;
+                    }
+                    st.is_resolving = false;
+                    st.track_started_playing = false;
+                    st.last_open_instant = Some(Instant::now());
+                    st.sponsors = segs.clone();
+                    st.last_skipped_sponsor_uuid.clear();
+                }
                 let status = if ok {
                     format!("Tocando: {} — {}", track.title, track.artist)
                 } else {
@@ -444,12 +462,19 @@ fn spawn_music_resolve_and_play(
                     sponsors: segs,
                     status,
                 });
-                ctx.request_repaint();
+                request_repaint_if_window_visible(&ctx);
                 if !ok {
                     advance_music_in_background(&bg, &player, &tx, &ctx, false);
                 }
             }
             Err(e) => {
+                {
+                    let mut st = bg.lock().unwrap_or_else(|e| e.into_inner());
+                    if st.play_req_seq != req_id {
+                        return;
+                    }
+                    st.is_resolving = false;
+                }
                 let _ = tx.send(AsyncMessage::MusicBgStateChanged {
                     request_id: req_id,
                     index: Some(index),
@@ -457,7 +482,7 @@ fn spawn_music_resolve_and_play(
                     sponsors: Vec::new(),
                     status: e,
                 });
-                ctx.request_repaint();
+                request_repaint_if_window_visible(&ctx);
                 advance_music_in_background(&bg, &player, &tx, &ctx, false);
             }
         }
@@ -510,6 +535,8 @@ fn advance_music_in_background(
             let track = st.queue[idx].clone();
             st.current_index = Some(idx);
             st.is_resolving = true;
+            st.track_started_playing = false;
+            st.last_open_instant = None;
             st.sponsors.clear();
             st.last_skipped_sponsor_uuid.clear();
             st.play_req_seq = st.play_req_seq.wrapping_add(1);
@@ -518,13 +545,14 @@ fn advance_music_in_background(
         } else {
             st.current_index = None;
             st.is_resolving = false;
+            st.track_started_playing = false;
+            st.last_open_instant = None;
             st.sponsors.clear();
             None
         }
     };
 
     if let Some((idx, req_id, track, cfg, enable_sb)) = next_job {
-        player.stop_async();
         let _ = tx.send(AsyncMessage::MusicBgStateChanged {
             request_id: req_id,
             index: Some(idx),
@@ -532,7 +560,7 @@ fn advance_music_in_background(
             sponsors: Vec::new(),
             status: format!("Carregando música: {} — {}...", track.title, track.artist),
         });
-        ctx.request_repaint();
+        request_repaint_if_window_visible(ctx);
         spawn_music_resolve_and_play(
             Arc::clone(bg),
             Arc::clone(player),
@@ -554,7 +582,7 @@ fn advance_music_in_background(
             sponsors: Vec::new(),
             status: "Fim da fila de música.".to_string(),
         });
-        ctx.request_repaint();
+        request_repaint_if_window_visible(ctx);
     }
 }
 
@@ -570,12 +598,12 @@ fn spawn_music_supervisor(
             thread::sleep(Duration::from_millis(250));
             let state = player.get_state();
 
-            // 3 = Playing: mantém volume DirectSound e pula SponsorBlock mesmo minimizado
+            // 3 = Playing: pula SponsorBlock mesmo minimizado
             if state == 3 {
-                player.sync_volume_if_needed();
                 let pos = player.get_position_seconds();
                 let skip_action = {
                     let mut st = bg.lock().unwrap_or_else(|e| e.into_inner());
+                    st.track_started_playing = true;
                     if st.enable_sponsor_block && st.auto_skip_sponsors && !st.sponsors.is_empty() {
                         if let Some((skip_to, seg)) = check_and_get_skip_target(pos, &st.sponsors) {
                             if seg.uuid != st.last_skipped_sponsor_uuid {
@@ -606,7 +634,7 @@ fn spawn_music_supervisor(
                         sponsors: segs,
                         status: format!("[SponsorBlock] {} pulado", label),
                     });
-                    ctx.request_repaint();
+                    request_repaint_if_window_visible(&ctx);
                 }
                 continue;
             }
@@ -615,8 +643,14 @@ fn spawn_music_supervisor(
             if state == 6 || state == 7 {
                 let should_advance = {
                     let mut st = bg.lock().unwrap_or_else(|e| e.into_inner());
+                    let ready_for_end = st.track_started_playing
+                        || st
+                            .last_open_instant
+                            .map(|t| t.elapsed() >= Duration::from_millis(2500))
+                            .unwrap_or(false);
                     if st.current_index.is_some()
                         && !st.is_resolving
+                        && ready_for_end
                         && st.ended_handled_seq != st.play_req_seq
                     {
                         st.ended_handled_seq = st.play_req_seq;
@@ -755,6 +789,8 @@ impl LiteTubeApp {
         let music_player = Arc::new(RustMediaPlayer::new(true));
         video_player.set_volume(config.video_volume, config.is_video_muted);
         music_player.set_volume(config.music_volume, config.is_music_muted);
+        video_player.start_poller();
+        music_player.start_poller();
 
         let music_bg = Arc::new(Mutex::new(MusicBgState {
             queue: Vec::new(),
@@ -762,6 +798,8 @@ impl LiteTubeApp {
             play_req_seq: 0,
             ended_handled_seq: 0,
             is_resolving: false,
+            track_started_playing: false,
+            last_open_instant: None,
             shuffle: config.shuffle,
             repeat_mode: config.repeat_mode(),
             volume: config.music_volume,
@@ -876,6 +914,7 @@ impl LiteTubeApp {
         let ipc_tx = app.tx.clone();
         let ipc_ctx = cc.egui_ctx.clone();
         start_ipc_pipe_server(move |url| {
+            bring_current_process_window_to_front();
             let _ = ipc_tx.send(AsyncMessage::ExternalPlayUrl(url));
             ipc_ctx.request_repaint();
         });
@@ -1642,6 +1681,8 @@ impl LiteTubeApp {
             st.queue = self.music_queue.clone();
             st.current_index = Some(index);
             st.is_resolving = true;
+            st.track_started_playing = false;
+            st.last_open_instant = None;
             st.sponsors.clear();
             st.last_skipped_sponsor_uuid.clear();
             st.shuffle = self.config.shuffle;
@@ -2087,11 +2128,14 @@ impl LiteTubeApp {
             }
         }
 
-        if self.music_current_index.is_some() {
+        if self.music_current_index.is_some()
+            && self.active_env == ActiveEnvironment::Music
+            && is_current_process_window_foreground()
+        {
             let mstate = self.music_player.get_state();
-            // Mantém a barra de progresso atualizando na UI durante Opening(1), Buffering(2), Playing(3) ou resolução
+            // Mantém a barra de progresso atualizando na UI quando a janela está em primeiro plano
             if self.music_is_resolving || matches!(mstate, 1 | 2 | 3) {
-                ctx.request_repaint_after(Duration::from_millis(200));
+                ctx.request_repaint_after(Duration::from_millis(250));
             }
         }
 
@@ -2160,6 +2204,14 @@ fn configure_windows_fonts_and_theme(ctx: &egui::Context) {
 
 impl eframe::App for LiteTubeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let is_minimized = is_current_process_window_minimized()
+            || ctx.input(|i| i.viewport().minimized.unwrap_or(false))
+            || ctx.content_rect().width() < 64.0
+            || ctx.content_rect().height() < 64.0;
+        if is_minimized {
+            return;
+        }
+
         self.process_async_messages(ctx);
         self.periodic_tick(ctx);
 
@@ -6218,6 +6270,7 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport,
+        vsync: false,
         ..Default::default()
     };
 

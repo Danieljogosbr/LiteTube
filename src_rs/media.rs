@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::ptr;
 use std::sync::{
     Arc, Mutex, OnceLock,
-    atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering},
 };
 use std::time::Duration;
 use windows::Win32::Foundation::HMODULE;
@@ -466,6 +466,11 @@ pub struct RustMediaPlayer {
     target_muted: AtomicBool,
     play_epoch: AtomicU64,
     op_lock: Mutex<()>,
+    cached_state: AtomicI32,
+    cached_playing: AtomicBool,
+    cached_time_ms: AtomicI64,
+    cached_length_ms: AtomicI64,
+    poller_stop: AtomicBool,
 }
 
 unsafe impl Send for RustMediaPlayer {}
@@ -522,6 +527,57 @@ impl RustMediaPlayer {
             target_muted: AtomicBool::new(false),
             play_epoch: AtomicU64::new(0),
             op_lock: Mutex::new(()),
+            cached_state: AtomicI32::new(0),
+            cached_playing: AtomicBool::new(false),
+            cached_time_ms: AtomicI64::new(0),
+            cached_length_ms: AtomicI64::new(0),
+            poller_stop: AtomicBool::new(false),
+        }
+    }
+
+    /// Inicia uma thread leve de telemetria em segundo plano (80ms) que atualiza estado,
+    /// posição, duração e volume DirectSound sob `op_lock.try_lock()`, garantindo que a
+    /// UI thread (`eframe::App::update`) NUNCA invoque funções FFI bloqueantes do LibVLC.
+    pub fn start_poller(self: &Arc<Self>) {
+        let me = Arc::clone(self);
+        std::thread::spawn(move || {
+            while !me.poller_stop.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(80));
+                me.poll_state_try_lock();
+            }
+        });
+    }
+
+    pub fn poll_state_try_lock(&self) {
+        let Some(ref api) = self.api else {
+            return;
+        };
+        if self.mp.is_null() {
+            return;
+        }
+        let Ok(_guard) = self.op_lock.try_lock() else {
+            return;
+        };
+        unsafe {
+            let st = (api.player_get_state)(self.mp);
+            let playing = (api.player_is_playing)(self.mp) != 0;
+            self.cached_state.store(st, Ordering::Release);
+            self.cached_playing.store(playing, Ordering::Release);
+
+            if playing || matches!(st, 1 | 2 | 3 | 4) {
+                let t_ms = (api.player_get_time)(self.mp);
+                if t_ms >= 0 {
+                    self.cached_time_ms.store(t_ms, Ordering::Release);
+                }
+                let l_ms = (api.player_get_length)(self.mp);
+                if l_ms > 0 {
+                    self.cached_length_ms.store(l_ms, Ordering::Release);
+                }
+            }
+
+            if playing || st == 3 {
+                self.sync_volume_locked(api);
+            }
         }
     }
 
@@ -541,6 +597,11 @@ impl RustMediaPlayer {
         let vlc_vol = linear_to_vlc_volume(volume_0_to_1, is_muted);
         self.target_vlc_volume.store(vlc_vol, Ordering::Release);
         self.target_muted.store(is_muted || vlc_vol == 0, Ordering::Release);
+        self.cached_state.store(1, Ordering::Release);
+        self.cached_playing.store(false, Ordering::Release);
+        self.cached_time_ms
+            .store((start_seconds.max(0.0) * 1000.0).round() as i64, Ordering::Release);
+        self.cached_length_ms.store(0, Ordering::Release);
         self.open_and_play_for_epoch(
             epoch,
             video_or_main_url,
@@ -565,6 +626,11 @@ impl RustMediaPlayer {
         self.target_vlc_volume.store(vlc_vol, Ordering::Release);
         self.target_muted.store(is_muted || vlc_vol == 0, Ordering::Release);
         let epoch = self.play_epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        self.cached_state.store(1, Ordering::Release);
+        self.cached_playing.store(false, Ordering::Release);
+        self.cached_time_ms
+            .store((start_seconds.max(0.0) * 1000.0).round() as i64, Ordering::Release);
+        self.cached_length_ms.store(0, Ordering::Release);
         let me = Arc::clone(self);
         std::thread::spawn(move || {
             let _ = me.open_and_play_for_epoch(
@@ -641,9 +707,9 @@ impl RustMediaPlayer {
             (api.player_set_media)(self.mp, md);
             (api.media_release)(md);
 
-            self.apply_target_volume_now();
+            self.apply_target_volume_locked(api);
             let rc = (api.player_play)(self.mp);
-            self.apply_target_volume_now();
+            self.apply_target_volume_locked(api);
             if let Some(spd) = playback_speed {
                 if (spd - 1.0).abs() > 0.01 {
                     let r = spd.clamp(0.25, 2.0) as c_float;
@@ -651,51 +717,59 @@ impl RustMediaPlayer {
                 }
             }
 
-            // Garante reaplicação imediata assim que o DirectSound abrir (evita qualquer pico de 100%)
-            let me = Arc::clone(self);
-            std::thread::spawn(move || {
-                for _ in 0..40 {
-                    if me.play_epoch.load(Ordering::Acquire) != epoch {
-                        break;
-                    }
-                    me.sync_volume_if_needed();
-                    std::thread::sleep(Duration::from_millis(35));
-                }
-            });
+            if rc == 0 {
+                self.cached_state.store(1, Ordering::Release);
+                self.cached_playing.store(true, Ordering::Release);
+            } else {
+                self.cached_state.store(7, Ordering::Release);
+                self.cached_playing.store(false, Ordering::Release);
+            }
 
             rc == 0
         }
     }
 
     pub fn play(&self) {
+        self.cached_playing.store(true, Ordering::Release);
+        self.cached_state.store(3, Ordering::Release);
         if let Some(ref api) = self.api {
             if !self.mp.is_null() {
-                unsafe {
-                    let _ = (api.player_play)(self.mp);
+                if let Ok(_guard) = self.op_lock.try_lock() {
+                    unsafe {
+                        let _ = (api.player_play)(self.mp);
+                        self.apply_target_volume_locked(api);
+                    }
                 }
-                self.apply_target_volume_now();
             }
         }
     }
 
     pub fn pause(&self) {
+        self.cached_playing.store(false, Ordering::Release);
+        self.cached_state.store(4, Ordering::Release);
         if let Some(ref api) = self.api {
             if !self.mp.is_null() {
-                unsafe {
-                    (api.player_set_pause)(self.mp, 1);
+                if let Ok(_guard) = self.op_lock.try_lock() {
+                    unsafe {
+                        (api.player_set_pause)(self.mp, 1);
+                    }
                 }
             }
         }
     }
 
     pub fn set_paused(&self, paused: bool) {
+        self.cached_playing.store(!paused, Ordering::Release);
+        self.cached_state.store(if paused { 4 } else { 3 }, Ordering::Release);
         if let Some(ref api) = self.api {
             if !self.mp.is_null() {
-                unsafe {
-                    (api.player_set_pause)(self.mp, if paused { 1 } else { 0 });
-                }
-                if !paused {
-                    self.apply_target_volume_now();
+                if let Ok(_guard) = self.op_lock.try_lock() {
+                    unsafe {
+                        (api.player_set_pause)(self.mp, if paused { 1 } else { 0 });
+                        if !paused {
+                            self.apply_target_volume_locked(api);
+                        }
+                    }
                 }
             }
         }
@@ -703,6 +777,9 @@ impl RustMediaPlayer {
 
     pub fn stop(&self) {
         self.play_epoch.fetch_add(1, Ordering::AcqRel);
+        self.cached_playing.store(false, Ordering::Release);
+        self.cached_state.store(5, Ordering::Release);
+        self.cached_time_ms.store(0, Ordering::Release);
         let _guard = self.op_lock.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ref api) = self.api {
             if !self.mp.is_null() {
@@ -715,6 +792,9 @@ impl RustMediaPlayer {
 
     pub fn stop_async(self: &Arc<Self>) {
         let epoch = self.play_epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        self.cached_playing.store(false, Ordering::Release);
+        self.cached_state.store(5, Ordering::Release);
+        self.cached_time_ms.store(0, Ordering::Release);
         let me = Arc::clone(self);
         std::thread::spawn(move || {
             let _guard = me.op_lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -732,25 +812,11 @@ impl RustMediaPlayer {
     }
 
     pub fn is_playing(&self) -> bool {
-        if let Some(ref api) = self.api {
-            if !self.mp.is_null() {
-                unsafe {
-                    return (api.player_is_playing)(self.mp) != 0;
-                }
-            }
-        }
-        false
+        self.cached_playing.load(Ordering::Acquire)
     }
 
     pub fn get_state(&self) -> i32 {
-        if let Some(ref api) = self.api {
-            if !self.mp.is_null() {
-                unsafe {
-                    return (api.player_get_state)(self.mp);
-                }
-            }
-        }
-        0
+        self.cached_state.load(Ordering::Acquire)
     }
 
     pub fn is_ended(&self) -> bool {
@@ -758,39 +824,32 @@ impl RustMediaPlayer {
     }
 
     pub fn get_position_seconds(&self) -> f64 {
-        if let Some(ref api) = self.api {
-            if !self.mp.is_null() {
-                unsafe {
-                    let ms = (api.player_get_time)(self.mp);
-                    if ms > 0 {
-                        return ms as f64 / 1000.0;
-                    }
-                }
-            }
+        let ms = self.cached_time_ms.load(Ordering::Acquire);
+        if ms > 0 {
+            ms as f64 / 1000.0
+        } else {
+            0.0
         }
-        0.0
     }
 
     pub fn get_duration_seconds(&self) -> f64 {
-        if let Some(ref api) = self.api {
-            if !self.mp.is_null() {
-                unsafe {
-                    let ms = (api.player_get_length)(self.mp);
-                    if ms > 0 {
-                        return ms as f64 / 1000.0;
-                    }
-                }
-            }
+        let ms = self.cached_length_ms.load(Ordering::Acquire);
+        if ms > 0 {
+            ms as f64 / 1000.0
+        } else {
+            0.0
         }
-        0.0
     }
 
     pub fn seek_seconds(&self, seconds: f64) {
+        let ms = (seconds.max(0.0) * 1000.0).round() as i64;
+        self.cached_time_ms.store(ms, Ordering::Release);
         if let Some(ref api) = self.api {
             if !self.mp.is_null() {
-                unsafe {
-                    let ms = (seconds.max(0.0) * 1000.0).round() as i64;
-                    (api.player_set_time)(self.mp, ms);
+                if let Ok(_guard) = self.op_lock.try_lock() {
+                    unsafe {
+                        (api.player_set_time)(self.mp, ms);
+                    }
                 }
             }
         }
@@ -800,7 +859,15 @@ impl RustMediaPlayer {
         let vlc_vol = linear_to_vlc_volume(vol_0_to_1, is_muted);
         self.target_vlc_volume.store(vlc_vol, Ordering::Release);
         self.target_muted.store(is_muted || vlc_vol == 0, Ordering::Release);
-        self.apply_target_volume_now();
+        if let Some(ref api) = self.api {
+            if !self.mp.is_null() {
+                if let Ok(_guard) = self.op_lock.try_lock() {
+                    unsafe {
+                        self.apply_target_volume_locked(api);
+                    }
+                }
+            }
+        }
     }
 
     pub fn get_target_vlc_volume(&self) -> i32 {
@@ -811,39 +878,32 @@ impl RustMediaPlayer {
         }
     }
 
-    fn apply_target_volume_now(&self) {
-        if let Some(ref api) = self.api {
-            if !self.mp.is_null() {
-                let v = self.target_vlc_volume.load(Ordering::Acquire);
-                let muted = self.target_muted.load(Ordering::Acquire);
-                unsafe {
-                    (api.audio_set_mute)(self.mp, if muted { 1 } else { 0 });
-                    let _ = (api.audio_set_volume)(self.mp, if muted { 0 } else { v });
-                }
+    unsafe fn apply_target_volume_locked(&self, api: &LibVlcApi) {
+        let v = self.target_vlc_volume.load(Ordering::Acquire);
+        let muted = self.target_muted.load(Ordering::Acquire);
+        unsafe {
+            (api.audio_set_mute)(self.mp, if muted { 1 } else { 0 });
+            let _ = (api.audio_set_volume)(self.mp, if muted { 0 } else { v });
+        }
+    }
+
+    unsafe fn sync_volume_locked(&self, api: &LibVlcApi) {
+        let target_v = self.target_vlc_volume.load(Ordering::Acquire);
+        let target_m = self.target_muted.load(Ordering::Acquire);
+        unsafe {
+            let cur_v = (api.audio_get_volume)(self.mp);
+            let cur_m = (api.audio_get_mute)(self.mp);
+            let want_v = if target_m { 0 } else { target_v };
+            let want_m = if target_m { 1 } else { 0 };
+            if (cur_v >= 0 && cur_v != want_v) || (cur_m >= 0 && cur_m != want_m) {
+                (api.audio_set_mute)(self.mp, want_m);
+                let _ = (api.audio_set_volume)(self.mp, want_v);
             }
         }
     }
 
-    /// Reaplica o volume desejado caso o backend de áudio do LibVLC tenha acabado de abrir
-    /// ou reinicializado em 100%.
-    pub fn sync_volume_if_needed(&self) {
-        if let Some(ref api) = self.api {
-            if !self.mp.is_null() {
-                let target_v = self.target_vlc_volume.load(Ordering::Acquire);
-                let target_m = self.target_muted.load(Ordering::Acquire);
-                unsafe {
-                    let cur_v = (api.audio_get_volume)(self.mp);
-                    let cur_m = (api.audio_get_mute)(self.mp);
-                    let want_v = if target_m { 0 } else { target_v };
-                    let want_m = if target_m { 1 } else { 0 };
-                    if (cur_v >= 0 && cur_v != want_v) || (cur_m >= 0 && cur_m != want_m) {
-                        (api.audio_set_mute)(self.mp, want_m);
-                        let _ = (api.audio_set_volume)(self.mp, want_v);
-                    }
-                }
-            }
-        }
-    }
+    /// Mantido por compatibilidade; o poller de 80ms em segundo plano já sincroniza o volume sob `op_lock`.
+    pub fn sync_volume_if_needed(&self) {}
 
     pub fn list_audio_devices(&self) -> Vec<AudioOutputDeviceInfo> {
         let mut out = Vec::new();
@@ -857,6 +917,9 @@ impl RustMediaPlayer {
         if self.mp.is_null() {
             return out;
         }
+        let Ok(_guard) = self.op_lock.try_lock() else {
+            return out;
+        };
         unsafe {
             let head = enum_fn(self.mp);
             let mut cur = head;
@@ -894,19 +957,23 @@ impl RustMediaPlayer {
             return;
         }
         if let Ok(c_id) = CString::new(device_id) {
-            unsafe {
-                set_fn(self.mp, ptr::null(), c_id.as_ptr());
+            if let Ok(_guard) = self.op_lock.try_lock() {
+                unsafe {
+                    set_fn(self.mp, ptr::null(), c_id.as_ptr());
+                    self.apply_target_volume_locked(api);
+                }
             }
-            self.apply_target_volume_now();
         }
     }
 
     pub fn set_speed(&self, speed: f64) {
         if let Some(ref api) = self.api {
             if !self.mp.is_null() {
-                unsafe {
-                    let r = speed.clamp(0.25, 2.0) as c_float;
-                    let _ = (api.player_set_rate)(self.mp, r);
+                if let Ok(_guard) = self.op_lock.try_lock() {
+                    unsafe {
+                        let r = speed.clamp(0.25, 2.0) as c_float;
+                        let _ = (api.player_set_rate)(self.mp, r);
+                    }
                 }
             }
         }
@@ -915,10 +982,12 @@ impl RustMediaPlayer {
     pub fn get_speed(&self) -> f64 {
         if let Some(ref api) = self.api {
             if !self.mp.is_null() {
-                unsafe {
-                    let r = (api.player_get_rate)(self.mp) as f64;
-                    if r > 0.1 {
-                        return r;
+                if let Ok(_guard) = self.op_lock.try_lock() {
+                    unsafe {
+                        let r = (api.player_get_rate)(self.mp) as f64;
+                        if r > 0.1 {
+                            return r;
+                        }
                     }
                 }
             }
@@ -941,9 +1010,11 @@ impl RustMediaPlayer {
 
 impl Drop for RustMediaPlayer {
     fn drop(&mut self) {
+        self.poller_stop.store(true, Ordering::Release);
         self.play_epoch.fetch_add(1, Ordering::AcqRel);
         if let Some(ref api) = self.api {
             if !self.mp.is_null() {
+                let _guard = self.op_lock.lock().unwrap_or_else(|e| e.into_inner());
                 unsafe {
                     (api.player_stop)(self.mp);
                     (api.player_release)(self.mp);
