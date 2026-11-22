@@ -319,7 +319,7 @@ impl BoundedTextureCache {
                         rgba: Vec::new(),
                     });
                 }
-                ctx_clone.request_repaint();
+                request_repaint_if_window_visible(&ctx_clone);
             });
         }
         None
@@ -399,7 +399,7 @@ struct MusicBgState {
 }
 
 fn request_repaint_if_window_visible(ctx: &egui::Context) {
-    if !is_current_process_window_minimized() {
+    if !is_current_process_window_minimized() && is_current_process_window_foreground() {
         ctx.request_repaint();
     }
 }
@@ -2082,7 +2082,6 @@ impl LiteTubeApp {
                 self.video_texture =
                     Some(ctx.load_texture("video_frame", color_img, TextureOptions::LINEAR));
             }
-            ctx.request_repaint();
         }
 
         if self.current_video.is_some() {
@@ -6270,7 +6269,7 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport,
-        vsync: false,
+        vsync: true,
         ..Default::default()
     };
 
