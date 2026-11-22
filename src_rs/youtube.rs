@@ -2723,19 +2723,96 @@ pub fn extract_itag(url: &str) -> i32 {
         .unwrap_or(0)
 }
 
-pub fn extract_video_id_from_any_url(raw: &str) -> Option<String> {
-    let trimmed = raw.trim().trim_matches('"');
+pub fn parse_youtube_timestamp_seconds(raw_val: &str) -> Option<f64> {
+    let s = raw_val.trim().to_ascii_lowercase();
+    if s.is_empty() {
+        return None;
+    }
+    if let Ok(secs) = s.trim_end_matches('s').parse::<f64>() {
+        if secs >= 0.0 && secs.is_finite() {
+            return Some(secs);
+        }
+    }
+    let rx = Regex::new(r"^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s?)?$").ok()?;
+    let caps = rx.captures(&s)?;
+    let h: f64 = caps.get(1).and_then(|m| m.as_str().parse().ok()).unwrap_or(0.0);
+    let m: f64 = caps.get(2).and_then(|m| m.as_str().parse().ok()).unwrap_or(0.0);
+    let sec: f64 = caps.get(3).and_then(|m| m.as_str().parse().ok()).unwrap_or(0.0);
+    let total = h * 3600.0 + m * 60.0 + sec;
+    if total > 0.0 { Some(total) } else { None }
+}
+
+/// Faz o parse completo de URLs diretas do YouTube OU do protocolo `litetube://play?url=...`,
+/// retornando `(video_id, Option<segundos_iniciais>)`.
+pub fn parse_litetube_or_youtube_url(raw: &str) -> Option<(String, Option<f64>)> {
+    let mut candidate = raw.trim().trim_matches('"').to_string();
+    let mut start_sec: Option<f64> = None;
+
+    // 1. Desembrulha litetube://play?url=<encoded> (e captura &t= / &start= externo se houver)
+    if candidate.to_ascii_lowercase().starts_with("litetube://") {
+        if let Ok(parsed) = url::Url::parse(&candidate) {
+            let mut inner_url: Option<String> = None;
+            for (k, v) in parsed.query_pairs() {
+                let kl = k.to_ascii_lowercase();
+                if kl == "url" || kl == "u" || kl == "v" {
+                    inner_url = Some(v.into_owned());
+                } else if (kl == "t" || kl == "start") && start_sec.is_none() {
+                    start_sec = parse_youtube_timestamp_seconds(&v);
+                }
+            }
+            if let Some(u) = inner_url {
+                candidate = u.trim().trim_matches('"').to_string();
+            }
+        }
+    }
+
+    // 2. Se for uma URL válida, extrai query params (v, t, start) diretamente
+    if let Ok(parsed) = url::Url::parse(&candidate) {
+        let mut vid_from_query: Option<String> = None;
+        for (k, v) in parsed.query_pairs() {
+            let kl = k.to_ascii_lowercase();
+            if kl == "v" && v.len() == 11 {
+                vid_from_query = Some(v.into_owned());
+            } else if (kl == "t" || kl == "start") && start_sec.is_none() {
+                start_sec = parse_youtube_timestamp_seconds(&v);
+            }
+        }
+        if let Some(vid) = vid_from_query {
+            if vid.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                return Some((vid, start_sec));
+            }
+        }
+    }
+
+    // 3. Fallback: ID puro de 11 caracteres ou regex em URLs curtas (/shorts/, /live/, youtu.be/, etc.)
+    let trimmed = candidate.trim();
     if trimmed.len() == 11
         && trimmed
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
-        return Some(trimmed.to_string());
+        return Some((trimmed.to_string(), start_sec));
     }
-    let rx = Regex::new(r"(?:v=|youtu\.be/|/embed/|/shorts/|/watch/)([a-zA-Z0-9_-]{11})").ok()?;
-    rx.captures(trimmed)
+
+    let rx = Regex::new(r"(?:v=|youtu\.be/|/embed/|/shorts/|/live/|/watch/)([a-zA-Z0-9_-]{11})").ok()?;
+    let vid = rx
+        .captures(trimmed)
         .and_then(|c| c.get(1))
-        .map(|m| m.as_str().to_string())
+        .map(|m| m.as_str().to_string())?;
+
+    if start_sec.is_none() {
+        if let Ok(rx_t) = Regex::new(r"[?&#](?:t|start)=([0-9hmsHMS]+)") {
+            if let Some(t_val) = rx_t.captures(trimmed).and_then(|c| c.get(1)) {
+                start_sec = parse_youtube_timestamp_seconds(t_val.as_str());
+            }
+        }
+    }
+
+    Some((vid, start_sec))
+}
+
+pub fn extract_video_id_from_any_url(raw: &str) -> Option<String> {
+    parse_litetube_or_youtube_url(raw).map(|(vid, _)| vid)
 }
 
 // ============================================================================

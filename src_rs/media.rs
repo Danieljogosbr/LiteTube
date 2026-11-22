@@ -367,9 +367,11 @@ unsafe extern "C" fn vlc_video_format_cb(
         if w > 1920 {
             h = (h * 1920) / w;
             w = 1920;
-            *width = w;
-            *height = h;
         }
+        w = (w & !1).max(2);
+        h = (h & !1).max(2);
+        *width = w;
+        *height = h;
 
         let rv32 = b"RV32";
         ptr::copy_nonoverlapping(rv32.as_ptr() as *const c_char, chroma, 4);

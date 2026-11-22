@@ -240,13 +240,21 @@ pub struct YtDlpCookieScope {
 
 impl YtDlpCookieScope {
     pub fn create(cookies_file_path: &str, browser_for_cookies: &str) -> Self {
+        static TEMP_COOKIE_SEQ: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
         if let Some(plain) = load_cookies_plaintext(cookies_file_path) {
             if !plain.trim().is_empty() {
                 let nanos = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map(|d| d.as_nanos())
                     .unwrap_or(0);
-                let tmp = std::env::temp_dir().join(format!("lt_ck_{}.tmp", nanos));
+                let seq = TEMP_COOKIE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let tmp = std::env::temp_dir().join(format!(
+                    "lt_ck_{}_{}_{}.tmp",
+                    std::process::id(),
+                    nanos,
+                    seq
+                ));
                 if fs::write(&tmp, plain).is_ok() {
                     let arg = format!("--cookies \"{}\" ", tmp.display());
                     return Self {

@@ -22,8 +22,9 @@ use crate::auth::{
 };
 use crate::media::{RustMediaPlayer, linear_to_vlc_volume};
 use crate::memory::{
-    apply_dark_title_bar_to_current_process, get_current_ram_usage_mb, init_logger, log_error,
-    log_info, sanitize_sensitive_data, trim_memory,
+    apply_dark_title_bar_to_current_process, bring_current_process_window_to_front,
+    get_current_ram_usage_mb, init_logger, log_error, log_info, register_litetube_protocol,
+    sanitize_sensitive_data, start_ipc_pipe_server, trim_memory, try_send_ipc_play_url,
 };
 use crate::models::{
     AppConfig, ChannelPageData, RepeatMode, TrackItem, UserPlaylist, VideoChapter, VideoItem,
@@ -35,12 +36,13 @@ use crate::sponsorblock::{
 };
 use crate::youtube::{
     AccountFeedPage, ResolvedStream, detect_codec_from_urls, extract_chapters_from_description,
-    extract_video_id_from_any_url, fetch_account_playlists, fetch_channel_page,
+    fetch_account_playlists, fetch_channel_page,
     fetch_history_feed, fetch_home_feed, fetch_music_account_playlists, fetch_music_explore_feed,
     fetch_music_playlist_items, fetch_personalized_music_feed, fetch_playlist_items,
     fetch_search_continuation, fetch_subscriptions_feed, fetch_video_metadata,
-    fetch_watch_next_details, http_get_bytes, parse_music_carousel_shelves,
-    parse_music_playlist_items_json, parse_music_playlists_json, parse_playlists_json,
+    fetch_watch_next_details, http_get_bytes, parse_litetube_or_youtube_url,
+    parse_music_carousel_shelves, parse_music_playlist_items_json, parse_music_playlists_json,
+    parse_playlists_json,
     resolve_audio_only_stream, resolve_video_streams, search_youtube_page,
 };
 use eframe::egui::{
@@ -179,6 +181,13 @@ enum AsyncMessage {
         result: Result<String, String>,
         segments: Vec<SponsorSegment>,
     },
+    MusicBgStateChanged {
+        request_id: u64,
+        index: Option<usize>,
+        is_resolving: bool,
+        sponsors: Vec<SponsorSegment>,
+        status: String,
+    },
     ImageLoaded {
         cache_key: String,
         width: u32,
@@ -194,6 +203,7 @@ enum AsyncMessage {
         url: String,
         tracks: Vec<TrackItem>,
     },
+    ExternalPlayUrl(String),
 }
 
 // ============================================================================
@@ -204,6 +214,7 @@ struct BoundedTextureCache {
     textures: HashMap<String, TextureHandle>,
     order: VecDeque<String>,
     in_flight: HashSet<String>,
+    failed: HashSet<String>,
     max_entries: usize,
 }
 
@@ -213,6 +224,7 @@ impl BoundedTextureCache {
             textures: HashMap::new(),
             order: VecDeque::new(),
             in_flight: HashSet::new(),
+            failed: HashSet::new(),
             max_entries,
         }
     }
@@ -254,46 +266,59 @@ impl BoundedTextureCache {
         if let Some(tex) = self.textures.get(&cache_key) {
             return Some(tex.clone());
         }
+        if self.failed.contains(&cache_key) {
+            return None;
+        }
         if self.in_flight.len() < 16 && self.in_flight.insert(cache_key.clone()) {
             let url_owned = u.to_string();
             let key_owned = cache_key;
             let tx_clone = tx.clone();
             let ctx_clone = ctx.clone();
             thread::spawn(move || {
-                if let Some(bytes) = http_get_bytes(&url_owned) {
-                    if let Ok(img) = image::load_from_memory(&bytes) {
-                        let (w, h, rgba) = if circular_mask {
-                            let sq = img.resize_to_fill(72, 72, image::imageops::FilterType::Triangle).to_rgba8();
-                            let (sw, sh) = (sq.width(), sq.height());
-                            let mut raw = sq.into_raw();
-                            apply_smooth_circle_mask(&mut raw, sw, sh);
-                            (sw, sh, raw)
-                        } else {
-                            // Recorte 16:9 limpo sem barras pretas horizontais do hqdefault (4:3)
-                            let mut rgb = img.to_rgba8();
-                            let (iw, ih) = (rgb.width(), rgb.height());
-                            if iw == 480 && ih == 360 {
-                                // hqdefault.jpg tem barras pretas de 45px no topo e embaixo
-                                rgb = image::imageops::crop_imm(&rgb, 0, 45, 480, 270).to_image();
-                            }
-                            let resized = image::imageops::resize(
-                                &rgb,
-                                352,
-                                198,
-                                image::imageops::FilterType::Triangle,
-                            );
-                            let (rw, rh) = (resized.width(), resized.height());
-                            (rw, rh, resized.into_raw())
-                        };
-                        let _ = tx_clone.send(AsyncMessage::ImageLoaded {
-                            cache_key: key_owned,
-                            width: w,
-                            height: h,
-                            rgba,
-                        });
-                        ctx_clone.request_repaint();
-                    }
+                let decoded = http_get_bytes(&url_owned)
+                    .and_then(|bytes| image::load_from_memory(&bytes).ok());
+                if let Some(img) = decoded {
+                    let (w, h, rgba) = if circular_mask {
+                        let sq = img
+                            .resize_to_fill(72, 72, image::imageops::FilterType::Triangle)
+                            .to_rgba8();
+                        let (sw, sh) = (sq.width(), sq.height());
+                        let mut raw = sq.into_raw();
+                        apply_smooth_circle_mask(&mut raw, sw, sh);
+                        (sw, sh, raw)
+                    } else {
+                        // Recorte 16:9 limpo sem barras pretas horizontais do hqdefault (4:3)
+                        let mut rgb = img.to_rgba8();
+                        let (iw, ih) = (rgb.width(), rgb.height());
+                        if iw == 480 && ih == 360 {
+                            // hqdefault.jpg tem barras pretas de 45px no topo e embaixo
+                            rgb = image::imageops::crop_imm(&rgb, 0, 45, 480, 270).to_image();
+                        }
+                        let resized = image::imageops::resize(
+                            &rgb,
+                            352,
+                            198,
+                            image::imageops::FilterType::Triangle,
+                        );
+                        let (rw, rh) = (resized.width(), resized.height());
+                        (rw, rh, resized.into_raw())
+                    };
+                    let _ = tx_clone.send(AsyncMessage::ImageLoaded {
+                        cache_key: key_owned,
+                        width: w,
+                        height: h,
+                        rgba,
+                    });
+                } else {
+                    // Garante remoção de `in_flight` em caso de erro HTTP/404 ou imagem inválida
+                    let _ = tx_clone.send(AsyncMessage::ImageLoaded {
+                        cache_key: key_owned,
+                        width: 0,
+                        height: 0,
+                        rgba: Vec::new(),
+                    });
                 }
+                ctx_clone.request_repaint();
             });
         }
         None
@@ -302,18 +327,28 @@ impl BoundedTextureCache {
     fn insert(&mut self, ctx: &egui::Context, cache_key: String, width: u32, height: u32, rgba: Vec<u8>) {
         self.in_flight.remove(&cache_key);
         if width == 0 || height == 0 || rgba.len() != (width * height * 4) as usize {
+            if self.failed.len() >= 512 {
+                self.failed.clear();
+            }
+            self.failed.insert(cache_key);
             return;
         }
-        while self.textures.len() >= self.max_entries {
-            if let Some(oldest) = self.order.pop_front() {
-                self.textures.remove(&oldest);
-            } else {
-                break;
+        self.failed.remove(&cache_key);
+        let is_new_key = !self.textures.contains_key(&cache_key);
+        if is_new_key {
+            while self.textures.len() >= self.max_entries {
+                if let Some(oldest) = self.order.pop_front() {
+                    self.textures.remove(&oldest);
+                } else {
+                    break;
+                }
             }
         }
         let color_img = ColorImage::from_rgba_unmultiplied([width as usize, height as usize], &rgba);
         let handle = ctx.load_texture(&cache_key, color_img, TextureOptions::LINEAR);
-        self.order.push_back(cache_key.clone());
+        if is_new_key {
+            self.order.push_back(cache_key.clone());
+        }
         self.textures.insert(cache_key, handle);
     }
 }
@@ -339,6 +374,266 @@ fn apply_smooth_circle_mask(rgba: &mut [u8], w: u32, h: u32) {
 }
 
 // ============================================================================
+// Supervisor de Áudio em Segundo Plano (continua tocando e trocando faixas
+// mesmo com o LiteTube minimizado ou atrás de jogos/navegadores!)
+// ============================================================================
+
+struct MusicBgState {
+    queue: Vec<TrackItem>,
+    current_index: Option<usize>,
+    play_req_seq: u64,
+    ended_handled_seq: u64,
+    is_resolving: bool,
+    shuffle: bool,
+    repeat_mode: RepeatMode,
+    volume: f64,
+    is_muted: bool,
+    enable_sponsor_block: bool,
+    auto_skip_sponsors: bool,
+    sponsors: Vec<SponsorSegment>,
+    last_skipped_sponsor_uuid: String,
+    config_snapshot: AppConfig,
+}
+
+fn spawn_music_resolve_and_play(
+    bg: Arc<Mutex<MusicBgState>>,
+    player: Arc<RustMediaPlayer>,
+    tx: mpsc::Sender<AsyncMessage>,
+    ctx: egui::Context,
+    index: usize,
+    req_id: u64,
+    track: TrackItem,
+    cfg: AppConfig,
+    enable_sb: bool,
+) {
+    thread::spawn(move || {
+        let res = resolve_audio_only_stream(&track.id, &cfg);
+        let segs = if enable_sb {
+            get_music_sponsor_segments(&track.id)
+        } else {
+            Vec::new()
+        };
+
+        let (still_current, vol, muted) = {
+            let mut st = bg.lock().unwrap_or_else(|e| e.into_inner());
+            if st.play_req_seq != req_id {
+                return;
+            }
+            st.is_resolving = false;
+            st.sponsors = segs.clone();
+            st.last_skipped_sponsor_uuid.clear();
+            (true, st.volume, st.is_muted)
+        };
+        if !still_current {
+            return;
+        }
+
+        match res {
+            Ok(url) => {
+                // Abre e inicia a reprodução DIRETO na thread de fundo — não depende de eframe::App::update()!
+                let ok = player.open_and_play(&url, None, 0.0, vol, muted);
+                let status = if ok {
+                    format!("Tocando: {} — {}", track.title, track.artist)
+                } else {
+                    format!("Falha ao tocar '{}'. Avançando...", track.title)
+                };
+                let _ = tx.send(AsyncMessage::MusicBgStateChanged {
+                    request_id: req_id,
+                    index: Some(index),
+                    is_resolving: false,
+                    sponsors: segs,
+                    status,
+                });
+                ctx.request_repaint();
+                if !ok {
+                    advance_music_in_background(&bg, &player, &tx, &ctx, false);
+                }
+            }
+            Err(e) => {
+                let _ = tx.send(AsyncMessage::MusicBgStateChanged {
+                    request_id: req_id,
+                    index: Some(index),
+                    is_resolving: false,
+                    sponsors: Vec::new(),
+                    status: e,
+                });
+                ctx.request_repaint();
+                advance_music_in_background(&bg, &player, &tx, &ctx, false);
+            }
+        }
+    });
+}
+
+fn next_pseudo_random_u64() -> u64 {
+    static RNG_SEQ: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0x9E37_79B9_7F4A_7C15);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(1);
+    let seq =
+        RNG_SEQ.fetch_add(0xBF58_476D_1CE4_E5B9, std::sync::atomic::Ordering::Relaxed);
+    let mut z = nanos ^ seq;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+fn advance_music_in_background(
+    bg: &Arc<Mutex<MusicBgState>>,
+    player: &Arc<RustMediaPlayer>,
+    tx: &mpsc::Sender<AsyncMessage>,
+    ctx: &egui::Context,
+    respect_repeat_one: bool,
+) {
+    let next_job = {
+        let mut st = bg.lock().unwrap_or_else(|e| e.into_inner());
+        if st.queue.is_empty() {
+            return;
+        }
+        let cur = st.current_index.unwrap_or(0);
+        let next_idx = if respect_repeat_one && st.repeat_mode == RepeatMode::RepeatOne {
+            Some(cur.min(st.queue.len() - 1))
+        } else if respect_repeat_one && st.shuffle && st.queue.len() > 1 {
+            let seed = next_pseudo_random_u64() as usize;
+            let step = 1 + (seed % (st.queue.len() - 1));
+            Some((cur + step) % st.queue.len())
+        } else if cur + 1 < st.queue.len() {
+            Some(cur + 1)
+        } else if respect_repeat_one && st.repeat_mode == RepeatMode::RepeatAll {
+            Some(0)
+        } else {
+            None
+        };
+
+        if let Some(idx) = next_idx {
+            let track = st.queue[idx].clone();
+            st.current_index = Some(idx);
+            st.is_resolving = true;
+            st.sponsors.clear();
+            st.last_skipped_sponsor_uuid.clear();
+            st.play_req_seq = st.play_req_seq.wrapping_add(1);
+            let req_id = st.play_req_seq;
+            Some((idx, req_id, track, st.config_snapshot.clone(), st.enable_sponsor_block))
+        } else {
+            st.current_index = None;
+            st.is_resolving = false;
+            st.sponsors.clear();
+            None
+        }
+    };
+
+    if let Some((idx, req_id, track, cfg, enable_sb)) = next_job {
+        player.stop_async();
+        let _ = tx.send(AsyncMessage::MusicBgStateChanged {
+            request_id: req_id,
+            index: Some(idx),
+            is_resolving: true,
+            sponsors: Vec::new(),
+            status: format!("Carregando música: {} — {}...", track.title, track.artist),
+        });
+        ctx.request_repaint();
+        spawn_music_resolve_and_play(
+            Arc::clone(bg),
+            Arc::clone(player),
+            tx.clone(),
+            ctx.clone(),
+            idx,
+            req_id,
+            track,
+            cfg,
+            enable_sb,
+        );
+    } else {
+        player.stop_async();
+        let seq = bg.lock().map(|s| s.play_req_seq).unwrap_or(0);
+        let _ = tx.send(AsyncMessage::MusicBgStateChanged {
+            request_id: seq,
+            index: None,
+            is_resolving: false,
+            sponsors: Vec::new(),
+            status: "Fim da fila de música.".to_string(),
+        });
+        ctx.request_repaint();
+    }
+}
+
+fn spawn_music_supervisor(
+    bg: Arc<Mutex<MusicBgState>>,
+    player: Arc<RustMediaPlayer>,
+    tx: mpsc::Sender<AsyncMessage>,
+    ctx: egui::Context,
+    stop_flag: Arc<std::sync::atomic::AtomicBool>,
+) {
+    thread::spawn(move || {
+        while !stop_flag.load(std::sync::atomic::Ordering::Acquire) {
+            thread::sleep(Duration::from_millis(250));
+            let state = player.get_state();
+
+            // 3 = Playing: mantém volume DirectSound e pula SponsorBlock mesmo minimizado
+            if state == 3 {
+                player.sync_volume_if_needed();
+                let pos = player.get_position_seconds();
+                let skip_action = {
+                    let mut st = bg.lock().unwrap_or_else(|e| e.into_inner());
+                    if st.enable_sponsor_block && st.auto_skip_sponsors && !st.sponsors.is_empty() {
+                        if let Some((skip_to, seg)) = check_and_get_skip_target(pos, &st.sponsors) {
+                            if seg.uuid != st.last_skipped_sponsor_uuid {
+                                st.last_skipped_sponsor_uuid = seg.uuid.clone();
+                                Some((
+                                    skip_to,
+                                    seg.category_label().to_string(),
+                                    st.play_req_seq,
+                                    st.current_index,
+                                    st.sponsors.clone(),
+                                ))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                };
+                if let Some((skip_to, label, req_id, idx, segs)) = skip_action {
+                    player.seek_seconds(skip_to);
+                    let _ = tx.send(AsyncMessage::MusicBgStateChanged {
+                        request_id: req_id,
+                        index: idx,
+                        is_resolving: false,
+                        sponsors: segs,
+                        status: format!("[SponsorBlock] {} pulado", label),
+                    });
+                    ctx.request_repaint();
+                }
+                continue;
+            }
+
+            // 6 = Ended, 7 = Error: avança automaticamente para a próxima faixa em segundo plano!
+            if state == 6 || state == 7 {
+                let should_advance = {
+                    let mut st = bg.lock().unwrap_or_else(|e| e.into_inner());
+                    if st.current_index.is_some()
+                        && !st.is_resolving
+                        && st.ended_handled_seq != st.play_req_seq
+                    {
+                        st.ended_handled_seq = st.play_req_seq;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if should_advance {
+                    advance_music_in_background(&bg, &player, &tx, &ctx, state == 6);
+                }
+            }
+        }
+    });
+}
+
+// ============================================================================
 // Aplicação Principal LiteTubeApp
 // ============================================================================
 
@@ -346,6 +641,7 @@ struct LiteTubeApp {
     config: AppConfig,
     tx: mpsc::Sender<AsyncMessage>,
     rx: mpsc::Receiver<AsyncMessage>,
+    egui_ctx: egui::Context,
     dark_titlebar_applied: u8,
 
     // Ambiente & Navegação
@@ -432,6 +728,8 @@ struct LiteTubeApp {
     music_is_loading_feed: bool,
     opened_music_playlist: Option<TrackItem>,
     music_player: Arc<RustMediaPlayer>,
+    music_bg: Arc<Mutex<MusicBgState>>,
+    music_supervisor_stop: Arc<std::sync::atomic::AtomicBool>,
     music_queue: Vec<TrackItem>,
     music_current_index: Option<usize>,
     music_play_req_seq: u64,
@@ -458,10 +756,29 @@ impl LiteTubeApp {
         video_player.set_volume(config.video_volume, config.is_video_muted);
         music_player.set_volume(config.music_volume, config.is_music_muted);
 
+        let music_bg = Arc::new(Mutex::new(MusicBgState {
+            queue: Vec::new(),
+            current_index: None,
+            play_req_seq: 0,
+            ended_handled_seq: 0,
+            is_resolving: false,
+            shuffle: config.shuffle,
+            repeat_mode: config.repeat_mode(),
+            volume: config.music_volume,
+            is_muted: config.is_music_muted,
+            enable_sponsor_block: config.enable_sponsor_block,
+            auto_skip_sponsors: config.auto_skip_sponsors,
+            sponsors: Vec::new(),
+            last_skipped_sponsor_uuid: String::new(),
+            config_snapshot: config.clone(),
+        }));
+        let music_supervisor_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
         let mut app = Self {
             config,
             tx,
             rx,
+            egui_ctx: cc.egui_ctx.clone(),
             dark_titlebar_applied: 0,
             active_env: ActiveEnvironment::Video,
             sidebar_expanded: true,
@@ -534,6 +851,8 @@ impl LiteTubeApp {
             music_is_loading_feed: false,
             opened_music_playlist: None,
             music_player,
+            music_bg,
+            music_supervisor_stop,
             music_queue: Vec::new(),
             music_current_index: None,
             music_play_req_seq: 0,
@@ -552,6 +871,23 @@ impl LiteTubeApp {
         if let Some(url) = startup_url {
             app.play_video_by_url(&url);
         }
+
+        // Servidor IPC Named Pipe para receber links externos (Cortex / litetube://) em instância única
+        let ipc_tx = app.tx.clone();
+        let ipc_ctx = cc.egui_ctx.clone();
+        start_ipc_pipe_server(move |url| {
+            let _ = ipc_tx.send(AsyncMessage::ExternalPlayUrl(url));
+            ipc_ctx.request_repaint();
+        });
+
+        // Supervisor de Música em segundo plano (garante troca de faixa mesmo minimizado/oculto)
+        spawn_music_supervisor(
+            Arc::clone(&app.music_bg),
+            Arc::clone(&app.music_player),
+            app.tx.clone(),
+            cc.egui_ctx.clone(),
+            Arc::clone(&app.music_supervisor_stop),
+        );
 
         app
     }
@@ -589,17 +925,54 @@ impl LiteTubeApp {
             self.config.is_music_muted = false;
         }
         self.config.save();
+        self.sync_music_bg_prefs();
         self.music_player
             .set_volume(self.config.music_volume, self.config.is_music_muted);
     }
 
+    fn pause_or_abort_music_for_video(&mut self) {
+        if !self.config.auto_pause_music_when_video_plays {
+            return;
+        }
+        if self.music_is_resolving {
+            self.music_is_resolving = false;
+            if let Ok(mut st) = self.music_bg.lock() {
+                st.is_resolving = false;
+                st.play_req_seq = st.play_req_seq.wrapping_add(1);
+                st.ended_handled_seq = st.play_req_seq;
+                self.music_play_req_seq = st.play_req_seq;
+            }
+            self.music_player.stop_async();
+        } else if self.music_player.is_playing() {
+            self.music_player.pause();
+        }
+    }
+
+    fn pause_or_abort_video_for_music(&mut self) {
+        if !self.config.auto_pause_music_when_video_plays {
+            return;
+        }
+        if self.video_is_resolving {
+            self.video_is_resolving = false;
+            self.video_play_req_seq = self.video_play_req_seq.wrapping_add(1);
+            self.video_ended_handled_seq = self.video_play_req_seq;
+            self.video_player.stop_async();
+        } else if self.video_player.is_playing() {
+            self.save_current_video_progress(false);
+            self.video_player.pause();
+        }
+    }
+
     fn toggle_video_play_pause(&mut self) {
         let playing = self.video_player.is_playing();
-        if !playing
-            && self.config.auto_pause_music_when_video_plays
-            && self.music_player.is_playing()
-        {
-            self.music_player.pause();
+        if !playing {
+            self.pause_or_abort_music_for_video();
+            if !self.video_is_resolving && matches!(self.video_player.get_state(), 0 | 5 | 6 | 7) {
+                if let Some(cur) = self.current_video.clone() {
+                    self.start_video_playback(cur, Some(0.0));
+                    return;
+                }
+            }
         }
         self.video_player.set_paused(playing);
         self.last_player_activity = Instant::now();
@@ -607,11 +980,14 @@ impl LiteTubeApp {
 
     fn toggle_music_play_pause(&mut self) {
         let playing = self.music_player.is_playing();
-        if !playing
-            && self.config.auto_pause_music_when_video_plays
-            && self.video_player.is_playing()
-        {
-            self.video_player.pause();
+        if !playing {
+            self.pause_or_abort_video_for_music();
+            if !self.music_is_resolving && matches!(self.music_player.get_state(), 0 | 5 | 6 | 7) {
+                if let Some(idx) = self.music_current_index {
+                    self.play_music_index(idx);
+                    return;
+                }
+            }
         }
         self.music_player.set_paused(playing);
     }
@@ -927,7 +1303,7 @@ impl LiteTubeApp {
     }
 
     fn play_video_by_url(&mut self, raw_url: &str) {
-        if let Some(vid) = extract_video_id_from_any_url(raw_url) {
+        if let Some((vid, start_sec)) = parse_litetube_or_youtube_url(raw_url) {
             let item = TrackItem {
                 id: vid.clone(),
                 title: format!("Vídeo ({})", vid),
@@ -936,7 +1312,7 @@ impl LiteTubeApp {
                 ..Default::default()
             };
             self.active_env = ActiveEnvironment::Video;
-            self.start_video_playback(item, None);
+            self.start_video_playback(item, start_sec);
         } else {
             self.show_toast("URL ou ID de vídeo inválido.");
         }
@@ -963,14 +1339,17 @@ impl LiteTubeApp {
         }
 
         self.save_current_video_progress(false);
-
-        if self.config.auto_pause_music_when_video_plays && self.music_player.is_playing() {
-            self.music_player.pause();
-        }
+        self.pause_or_abort_music_for_video();
 
         if video.custom_thumb_url.is_empty() {
             video.custom_thumb_url = format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", video.id);
         }
+
+        let is_same_video = self
+            .current_video
+            .as_ref()
+            .map(|cur| cur.id.eq_ignore_ascii_case(&video.id))
+            .unwrap_or(false);
 
         let resume_sec = override_start_sec.unwrap_or_else(|| {
             WatchHistoryService::instance()
@@ -981,14 +1360,26 @@ impl LiteTubeApp {
 
         self.video_watch_open = true;
         self.current_video = Some(video.clone());
-        self.current_video_sponsors.clear();
-        self.current_video_storyboard = None;
-        self.storyboard_preview_tex = None;
         self.last_skipped_video_sponsor_uuid.clear();
         self.video_prefetch_triggered = false;
-        self.video_description_expanded = false;
         self.video_show_gear_popup = false;
         self.last_player_activity = Instant::now();
+
+        if !is_same_video {
+            self.video_texture = None;
+            self.current_video_meta = VideoItem::default();
+            self.current_video_chapters.clear();
+            self.current_video_related.clear();
+            self.current_video_sub_count.clear();
+            self.current_video_sponsors.clear();
+            self.current_video_storyboard = None;
+            self.storyboard_preview_tex = None;
+            self.last_storyboard_req_sec = -10.0;
+            if let Ok(mut sc) = self.storyboard_sheet_cache.lock() {
+                sc.clear();
+            }
+            self.video_description_expanded = false;
+        }
 
         self.video_play_req_seq = self.video_play_req_seq.wrapping_add(1);
         let req_id = self.video_play_req_seq;
@@ -999,12 +1390,14 @@ impl LiteTubeApp {
                 let stream = pf_stream.clone();
                 self.video_prefetched = None;
                 self.apply_resolved_video_stream(&video, stream, resume_sec);
-                self.spawn_video_aux_fetches(&video);
+                if !is_same_video {
+                    self.spawn_video_aux_fetches(&video);
+                }
                 return;
             }
         }
 
-        self.video_player.pause();
+        self.video_player.stop_async();
         self.video_is_resolving = true;
         self.status_text = format!("Conectando ao YouTube ({}p): {}...", target_q, video.title);
 
@@ -1022,7 +1415,9 @@ impl LiteTubeApp {
             });
         });
 
-        self.spawn_video_aux_fetches(&video);
+        if !is_same_video {
+            self.spawn_video_aux_fetches(&video);
+        }
     }
 
     fn spawn_video_aux_fetches(&self, video: &TrackItem) {
@@ -1199,6 +1594,19 @@ impl LiteTubeApp {
         });
     }
 
+    fn sync_music_bg_prefs(&self) {
+        if let Ok(mut st) = self.music_bg.lock() {
+            st.queue = self.music_queue.clone();
+            st.shuffle = self.config.shuffle;
+            st.repeat_mode = self.config.repeat_mode();
+            st.volume = self.config.music_volume;
+            st.is_muted = self.config.is_music_muted;
+            st.enable_sponsor_block = self.config.enable_sponsor_block;
+            st.auto_skip_sponsors = self.config.auto_skip_sponsors;
+            st.config_snapshot = self.config.clone();
+        }
+    }
+
     fn set_music_queue_and_play(&mut self, tracks: Vec<TrackItem>, start_index: usize) {
         let playable: Vec<TrackItem> = tracks
             .into_iter()
@@ -1209,6 +1617,10 @@ impl LiteTubeApp {
         }
         let idx = start_index.min(playable.len() - 1);
         self.music_queue = playable;
+        if self.music_nav == MusicNavSection::Queue {
+            self.music_items = self.music_queue.clone();
+        }
+        self.sync_music_bg_prefs();
         self.play_music_index(idx);
     }
 
@@ -1216,9 +1628,7 @@ impl LiteTubeApp {
         if index >= self.music_queue.len() {
             return;
         }
-        if self.config.auto_pause_music_when_video_plays && self.video_player.is_playing() {
-            self.video_player.pause();
-        }
+        self.pause_or_abort_video_for_music();
         self.music_current_index = Some(index);
         let track = self.music_queue[index].clone();
 
@@ -1226,29 +1636,39 @@ impl LiteTubeApp {
         self.music_sponsors.clear();
         self.last_skipped_music_sponsor_uuid.clear();
         self.music_is_resolving = true;
-        self.music_play_req_seq = self.music_play_req_seq.wrapping_add(1);
-        let req_id = self.music_play_req_seq;
+
+        let req_id = {
+            let mut st = self.music_bg.lock().unwrap_or_else(|e| e.into_inner());
+            st.queue = self.music_queue.clone();
+            st.current_index = Some(index);
+            st.is_resolving = true;
+            st.sponsors.clear();
+            st.last_skipped_sponsor_uuid.clear();
+            st.shuffle = self.config.shuffle;
+            st.repeat_mode = self.config.repeat_mode();
+            st.volume = self.config.music_volume;
+            st.is_muted = self.config.is_music_muted;
+            st.enable_sponsor_block = self.config.enable_sponsor_block;
+            st.auto_skip_sponsors = self.config.auto_skip_sponsors;
+            st.config_snapshot = self.config.clone();
+            st.play_req_seq = st.play_req_seq.wrapping_add(1);
+            st.play_req_seq
+        };
+        self.music_play_req_seq = req_id;
 
         self.status_text = format!("Carregando música: {} — {}...", track.title, track.artist);
 
-        let cfg = self.config.clone();
-        let tx = self.tx.clone();
-        let enable_sb = self.config.enable_sponsor_block;
-
-        thread::spawn(move || {
-            let res = resolve_audio_only_stream(&track.id, &cfg);
-            let segs = if enable_sb {
-                get_music_sponsor_segments(&track.id)
-            } else {
-                Vec::new()
-            };
-            let _ = tx.send(AsyncMessage::MusicStreamResolved {
-                request_id: req_id,
-                track,
-                result: res,
-                segments: segs,
-            });
-        });
+        spawn_music_resolve_and_play(
+            Arc::clone(&self.music_bg),
+            Arc::clone(&self.music_player),
+            self.tx.clone(),
+            self.egui_ctx.clone(),
+            index,
+            req_id,
+            track,
+            self.config.clone(),
+            self.config.enable_sponsor_block,
+        );
     }
 
     fn play_next_music(&mut self) {
@@ -1257,8 +1677,9 @@ impl LiteTubeApp {
         }
         let cur = self.music_current_index.unwrap_or(0);
         if self.config.shuffle && self.music_queue.len() > 1 {
-            let next = (cur + 1 + (Instant::now().elapsed().subsec_nanos() as usize))
-                % self.music_queue.len();
+            let seed = next_pseudo_random_u64() as usize;
+            let step = 1 + (seed % (self.music_queue.len() - 1));
+            let next = (cur + step) % self.music_queue.len();
             self.play_music_index(next);
             return;
         }
@@ -1268,6 +1689,17 @@ impl LiteTubeApp {
         } else if self.config.repeat_mode() == RepeatMode::RepeatAll {
             self.play_music_index(0);
         } else {
+            self.music_current_index = None;
+            self.music_is_resolving = false;
+            self.music_sponsors.clear();
+            if let Ok(mut st) = self.music_bg.lock() {
+                st.current_index = None;
+                st.is_resolving = false;
+                st.sponsors.clear();
+                st.play_req_seq = st.play_req_seq.wrapping_add(1);
+                st.ended_handled_seq = st.play_req_seq;
+                self.music_play_req_seq = st.play_req_seq;
+            }
             self.music_player.stop_async();
             self.status_text = "Fim da fila de música.".to_string();
         }
@@ -1513,6 +1945,21 @@ impl LiteTubeApp {
                         }
                     }
                 }
+                AsyncMessage::MusicBgStateChanged {
+                    request_id,
+                    index,
+                    is_resolving,
+                    sponsors,
+                    status,
+                } => {
+                    if request_id >= self.music_play_req_seq {
+                        self.music_play_req_seq = request_id;
+                        self.music_current_index = index;
+                        self.music_is_resolving = is_resolving;
+                        self.music_sponsors = sponsors;
+                        self.status_text = status;
+                    }
+                }
                 AsyncMessage::ImageLoaded {
                     cache_key,
                     width,
@@ -1546,7 +1993,7 @@ impl LiteTubeApp {
                 AsyncMessage::ImportedPlaylistLoaded { name, url, tracks } => {
                     if !tracks.is_empty() {
                         self.config.playlists.push(UserPlaylist {
-                            id: format!("pl_{}", Instant::now().elapsed().subsec_nanos()),
+                            id: format!("pl_{:x}", next_pseudo_random_u64()),
                             name: name.clone(),
                             source_url: url,
                             tracks,
@@ -1558,6 +2005,11 @@ impl LiteTubeApp {
                     } else {
                         self.status_text = "Nenhuma faixa encontrada na URL informada.".to_string();
                     }
+                }
+                AsyncMessage::ExternalPlayUrl(url) => {
+                    self.play_video_by_url(&url);
+                    bring_current_process_window_to_front();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
             }
         }
@@ -1636,36 +2088,10 @@ impl LiteTubeApp {
         }
 
         if self.music_current_index.is_some() {
-            if self.music_player.is_playing() {
-                let pos = self.music_player.get_position_seconds();
-                if self.config.enable_sponsor_block
-                    && self.config.auto_skip_sponsors
-                    && !self.music_sponsors.is_empty()
-                {
-                    if let Some((skip_to, seg)) =
-                        check_and_get_skip_target(pos, &self.music_sponsors)
-                    {
-                        if seg.uuid != self.last_skipped_music_sponsor_uuid {
-                            self.last_skipped_music_sponsor_uuid = seg.uuid.clone();
-                            self.music_player.seek_seconds(skip_to);
-                            self.status_text =
-                                format!("[SponsorBlock] {} pulado", seg.category_label());
-                        }
-                    }
-                }
+            let mstate = self.music_player.get_state();
+            // Mantém a barra de progresso atualizando na UI durante Opening(1), Buffering(2), Playing(3) ou resolução
+            if self.music_is_resolving || matches!(mstate, 1 | 2 | 3) {
                 ctx.request_repaint_after(Duration::from_millis(200));
-            } else if !self.music_is_resolving
-                && self.music_ended_handled_seq != self.music_play_req_seq
-                && self.music_player.is_ended()
-            {
-                self.music_ended_handled_seq = self.music_play_req_seq;
-                if self.config.repeat_mode() == RepeatMode::RepeatOne {
-                    if let Some(idx) = self.music_current_index {
-                        self.play_music_index(idx);
-                    }
-                } else {
-                    self.play_next_music();
-                }
             }
         }
 
@@ -1736,6 +2162,13 @@ impl eframe::App for LiteTubeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_async_messages(ctx);
         self.periodic_tick(ctx);
+
+        if self.video_is_fullscreen
+            && (!self.video_watch_open || self.active_env != ActiveEnvironment::Video)
+        {
+            self.video_is_fullscreen = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
 
         // Atalhos globais de teclado (K / Espaço / F / J / L / M / Setas)
         if !ctx.wants_keyboard_input() {
@@ -1873,6 +2306,8 @@ impl eframe::App for LiteTubeApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.music_supervisor_stop
+            .store(true, std::sync::atomic::Ordering::Release);
         self.save_current_video_progress(false);
         if self.config_dirty_since.take().is_some() {
             self.config.save();
@@ -2032,7 +2467,13 @@ impl LiteTubeApp {
                 );
                 if mus_resp.clicked() {
                     self.active_env = ActiveEnvironment::Music;
-                    if self.video_player.is_playing() {
+                    self.save_current_video_progress(false);
+                    if self.video_is_resolving {
+                        self.video_is_resolving = false;
+                        self.video_play_req_seq = self.video_play_req_seq.wrapping_add(1);
+                        self.video_ended_handled_seq = self.video_play_req_seq;
+                        self.video_player.stop_async();
+                    } else if self.video_player.is_playing() {
                         self.video_player.pause();
                     }
                     if self.music_items.is_empty() {
@@ -2256,93 +2697,96 @@ impl LiteTubeApp {
         // Dropdown Flutuante de Histórico de Buscas (igual SearchHistoryPopup no XAML)
         if self.search_history_open && !self.config.search_history.is_empty() {
             if let Some(sb_rect) = search_bar_rect_out {
-                let mut pick_query: Option<String> = None;
-                let mut remove_query: Option<String> = None;
+                let filter = self.search_query.trim().to_ascii_lowercase();
+                let matches: Vec<String> = self
+                    .config
+                    .search_history
+                    .iter()
+                    .filter(|h| filter.is_empty() || h.to_ascii_lowercase().contains(&filter))
+                    .take(8)
+                    .cloned()
+                    .collect();
 
-                let area_resp = egui::Area::new(egui::Id::new("search_history_popup"))
-                    .order(egui::Order::Foreground)
-                    .fixed_pos(Pos2::new(sb_rect.left(), sb_rect.bottom() + 4.0))
-                    .show(ctx, |ui| {
-                        egui::Frame::NONE
-                            .fill(Color32::from_rgb(0x1B, 0x1B, 0x1F))
-                            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(0x2E, 0x2E, 0x34)))
-                            .corner_radius(CornerRadius::same(12))
-                            .inner_margin(Margin::same(6))
-                            .show(ui, |ui| {
-                                ui.set_width(sb_rect.width() - 12.0);
-                                let filter = self.search_query.trim().to_ascii_lowercase();
-                                let matches: Vec<String> = self
-                                    .config
-                                    .search_history
-                                    .iter()
-                                    .filter(|h| {
-                                        filter.is_empty()
-                                            || h.to_ascii_lowercase().contains(&filter)
-                                    })
-                                    .take(8)
-                                    .cloned()
-                                    .collect();
-                                if matches.is_empty() {
-                                    self.search_history_open = false;
-                                }
-                                for item in matches {
-                                    ui.horizontal(|ui| {
-                                        let row_w = ui.available_width() - 28.0;
-                                        let (r_rect, r_resp) = ui.allocate_exact_size(
-                                            Vec2::new(row_w, 30.0),
-                                            Sense::click(),
-                                        );
-                                        if r_resp.hovered() {
-                                            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-                                            ui.painter().rect_filled(
-                                                r_rect,
-                                                CornerRadius::same(6),
-                                                BG_HOVER_ALT,
+                if !matches.is_empty() {
+                    let mut pick_query: Option<String> = None;
+                    let mut remove_query: Option<String> = None;
+
+                    let area_resp = egui::Area::new(egui::Id::new("search_history_popup"))
+                        .order(egui::Order::Foreground)
+                        .fixed_pos(Pos2::new(sb_rect.left(), sb_rect.bottom() + 4.0))
+                        .show(ctx, |ui| {
+                            egui::Frame::NONE
+                                .fill(Color32::from_rgb(0x1B, 0x1B, 0x1F))
+                                .stroke(Stroke::new(1.0_f32, Color32::from_rgb(0x2E, 0x2E, 0x34)))
+                                .corner_radius(CornerRadius::same(12))
+                                .inner_margin(Margin::same(6))
+                                .show(ui, |ui| {
+                                    ui.set_width(sb_rect.width() - 12.0);
+                                    for item in matches {
+                                        ui.horizontal(|ui| {
+                                            let row_w = ui.available_width() - 28.0;
+                                            let (r_rect, r_resp) = ui.allocate_exact_size(
+                                                Vec2::new(row_w, 30.0),
+                                                Sense::click(),
                                             );
-                                        }
-                                        icons::draw_history(
-                                            ui.painter(),
-                                            Pos2::new(r_rect.left() + 14.0, r_rect.center().y),
-                                            13.0,
-                                            TEXT_SECONDARY,
-                                        );
-                                        ui.painter().text(
-                                            Pos2::new(r_rect.left() + 32.0, r_rect.center().y),
-                                            Align2::LEFT_CENTER,
-                                            &item,
-                                            FontId::new(13.0, FontFamily::Proportional),
-                                            TEXT_PRIMARY,
-                                        );
-                                        if r_resp.clicked() {
-                                            pick_query = Some(item.clone());
-                                        }
+                                            if r_resp.hovered() {
+                                                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                                                ui.painter().rect_filled(
+                                                    r_rect,
+                                                    CornerRadius::same(6),
+                                                    BG_HOVER_ALT,
+                                                );
+                                            }
+                                            icons::draw_history(
+                                                ui.painter(),
+                                                Pos2::new(r_rect.left() + 14.0, r_rect.center().y),
+                                                13.0,
+                                                TEXT_SECONDARY,
+                                            );
+                                            ui.painter().text(
+                                                Pos2::new(r_rect.left() + 32.0, r_rect.center().y),
+                                                Align2::LEFT_CENTER,
+                                                &item,
+                                                FontId::new(13.0, FontFamily::Proportional),
+                                                TEXT_PRIMARY,
+                                            );
+                                            if r_resp.clicked() {
+                                                pick_query = Some(item.clone());
+                                            }
 
-                                        if ui
-                                            .add(
-                                                egui::Button::new(
-                                                    RichText::new("×")
-                                                        .size(13.0)
-                                                        .color(TEXT_MUTED),
+                                            if ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        RichText::new("×")
+                                                            .size(13.0)
+                                                            .color(TEXT_MUTED),
+                                                    )
+                                                    .fill(Color32::TRANSPARENT),
                                                 )
-                                                .fill(Color32::TRANSPARENT),
-                                            )
-                                            .clicked()
-                                        {
-                                            remove_query = Some(item);
-                                        }
-                                    });
-                                }
-                            });
-                    });
+                                                .clicked()
+                                            {
+                                                remove_query = Some(item);
+                                            }
+                                        });
+                                    }
+                                });
+                        });
 
-                if let Some(q) = pick_query {
-                    self.search_query = q;
-                    self.execute_search(false);
-                } else if let Some(rem) = remove_query {
-                    self.config.remove_search_history(&rem);
+                    if let Some(q) = pick_query {
+                        self.search_query = q;
+                        self.execute_search(false);
+                    } else if let Some(rem) = remove_query {
+                        self.config.remove_search_history(&rem);
+                    } else if ctx.input(|i| i.pointer.any_click()) {
+                        if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
+                            if !sb_rect.contains(pos) && !area_resp.response.rect.contains(pos) {
+                                self.search_history_open = false;
+                            }
+                        }
+                    }
                 } else if ctx.input(|i| i.pointer.any_click()) {
                     if let Some(pos) = ctx.input(|i| i.pointer.interact_pos()) {
-                        if !sb_rect.contains(pos) && !area_resp.response.rect.contains(pos) {
+                        if !sb_rect.contains(pos) {
                             self.search_history_open = false;
                         }
                     }
@@ -2779,8 +3223,17 @@ impl LiteTubeApp {
                                 action_play = Some(item.clone());
                             }
                             if c_ch {
-                                action_channel =
-                                    Some((item.channel_id.clone(), item.artist.clone()));
+                                if item.is_channel() {
+                                    let cid = if !item.channel_id.is_empty() {
+                                        item.channel_id.clone()
+                                    } else {
+                                        item.id.trim_start_matches("CH_").to_string()
+                                    };
+                                    action_channel = Some((cid, item.title.clone()));
+                                } else {
+                                    action_channel =
+                                        Some((item.channel_id.clone(), item.artist.clone()));
+                                }
                             }
                             if c_save {
                                 action_save = Some(item.clone());
@@ -4092,7 +4545,7 @@ impl LiteTubeApp {
                         self.config.shuffle = true;
                         self.config.save();
                         let tracks = self.music_items.clone();
-                        let start = (Instant::now().elapsed().subsec_nanos() as usize)
+                        let start = (next_pseudo_random_u64() as usize)
                             % tracks.len().max(1);
                         self.set_music_queue_and_play(tracks, start);
                     }
@@ -4316,6 +4769,8 @@ impl LiteTubeApp {
             if item.is_playlist_card() {
                 self.opened_music_playlist = Some(item);
                 self.load_music_section(MusicNavSection::AccountPlaylistTracks, false);
+            } else if self.music_nav == MusicNavSection::Queue && idx < self.music_queue.len() {
+                self.play_music_index(idx);
             } else {
                 let tracks = self.music_items.clone();
                 self.set_music_queue_and_play(tracks, idx);
@@ -4329,6 +4784,10 @@ impl LiteTubeApp {
         }
         if let Some(q_track) = action_queue {
             self.music_queue.push(q_track.clone());
+            if self.music_nav == MusicNavSection::Queue {
+                self.music_items = self.music_queue.clone();
+            }
+            self.sync_music_bg_prefs();
             self.status_text = format!("Adicionado à fila de música: {}", q_track.title);
         }
         if let Some(clip) = action_watch_clip {
@@ -4553,41 +5012,71 @@ impl LiteTubeApp {
                 }
 
                 let shuf_r = Rect::from_center_size(Pos2::new(cx - 98.0, cy), Vec2::new(34.0, 34.0));
-                let shuf_resp = ui.interact(shuf_r, ui.id().with("mbar_shuf"), Sense::click());
+                let shuf_resp = ui
+                    .interact(shuf_r, ui.id().with("mbar_shuf"), Sense::click())
+                    .on_hover_text(if self.config.shuffle {
+                        "Ordem aleatória: Ativada"
+                    } else {
+                        "Ordem aleatória: Desativada"
+                    });
                 if shuf_resp.hovered() {
                     ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                    painter.circle_filled(shuf_r.center(), 16.0, BG_HOVER_ALT);
                 }
                 icons::draw_shuffle(
                     &painter,
                     shuf_r.center(),
-                    15.0,
-                    if self.config.shuffle { YT_RED } else { Color32::from_rgb(0x9E, 0x9E, 0x9E) },
+                    18.0,
+                    if self.config.shuffle { YT_RED } else { Color32::from_rgb(0xB3, 0xB3, 0xB3) },
                 );
+                if self.config.shuffle {
+                    painter.circle_filled(
+                        Pos2::new(shuf_r.center().x, shuf_r.bottom() - 3.0),
+                        2.0,
+                        YT_RED,
+                    );
+                }
                 if shuf_resp.clicked() {
                     self.config.shuffle = !self.config.shuffle;
                     self.config.save();
+                    self.sync_music_bg_prefs();
                 }
 
                 let rep_r = Rect::from_center_size(Pos2::new(cx + 98.0, cy), Vec2::new(34.0, 34.0));
-                let rep_resp = ui.interact(rep_r, ui.id().with("mbar_rep"), Sense::click());
+                let rep = self.config.repeat_mode();
+                let rep_resp = ui
+                    .interact(rep_r, ui.id().with("mbar_rep"), Sense::click())
+                    .on_hover_text(match rep {
+                        RepeatMode::None => "Repetir: Desativado",
+                        RepeatMode::RepeatAll => "Repetir: Todas as faixas",
+                        RepeatMode::RepeatOne => "Repetir: Música atual (1)",
+                    });
                 if rep_resp.hovered() {
                     ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                    painter.circle_filled(rep_r.center(), 16.0, BG_HOVER_ALT);
                 }
-                let rep = self.config.repeat_mode();
                 icons::draw_repeat(
                     &painter,
                     rep_r.center(),
-                    15.0,
+                    18.0,
                     if rep == RepeatMode::None {
-                        Color32::from_rgb(0x9E, 0x9E, 0x9E)
+                        Color32::from_rgb(0xB3, 0xB3, 0xB3)
                     } else {
                         YT_RED
                     },
                     rep == RepeatMode::RepeatOne,
                 );
+                if rep != RepeatMode::None {
+                    painter.circle_filled(
+                        Pos2::new(rep_r.center().x, rep_r.bottom() - 3.0),
+                        2.0,
+                        YT_RED,
+                    );
+                }
                 if rep_resp.clicked() {
                     self.config.repeat = rep.next() as i32;
                     self.config.save();
+                    self.sync_music_bg_prefs();
                 }
 
                 // 4. DIREITA (Tempo + Slider Fino Branco 64px + Alto-falante + Fila)
@@ -4622,6 +5111,7 @@ impl LiteTubeApp {
                 if spk_resp.clicked() {
                     self.config.is_music_muted = !self.config.is_music_muted;
                     self.config.save();
+                    self.sync_music_bg_prefs();
                     self.music_player
                         .set_volume(self.config.music_volume, self.config.is_music_muted);
                 }
@@ -4646,6 +5136,7 @@ impl LiteTubeApp {
                         self.config.is_music_muted = false;
                     }
                     self.config.save();
+                    self.sync_music_bg_prefs();
                     self.music_player
                         .set_volume(self.config.music_volume, self.config.is_music_muted);
                 }
@@ -4928,10 +5419,13 @@ impl LiteTubeApp {
             .show(ctx, |ui| {
                 ui.label("Nome da nova playlist:");
                 ui.add_space(4.0);
-                ui.add(
+                let resp = ui.add(
                     egui::TextEdit::singleline(&mut self.new_playlist_name_input)
                         .desired_width(330.0),
                 );
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                    create_now = true;
+                }
                 ui.add_space(8.0);
                 if white_pill_button(ui, "Criar Playlist") {
                     create_now = true;
@@ -4941,7 +5435,7 @@ impl LiteTubeApp {
             let name = self.new_playlist_name_input.trim().to_string();
             if !name.is_empty() {
                 self.config.playlists.push(UserPlaylist {
-                    id: format!("pl_{}", Instant::now().elapsed().subsec_nanos()),
+                    id: format!("pl_{:x}", next_pseudo_random_u64()),
                     name,
                     source_url: String::new(),
                     tracks: Vec::new(),
@@ -4966,11 +5460,14 @@ impl LiteTubeApp {
             .show(ctx, |ui| {
                 ui.label("Cole a URL de uma playlist do YouTube ou YouTube Music:");
                 ui.add_space(6.0);
-                ui.add(
+                let resp = ui.add(
                     egui::TextEdit::singleline(&mut self.import_playlist_url_input)
                         .hint_text("https://music.youtube.com/playlist?list=...")
                         .desired_width(390.0),
                 );
+                if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                    do_import = true;
+                }
                 ui.add_space(10.0);
                 if white_pill_button(ui, "Importar Playlist") {
                     do_import = true;
@@ -5212,7 +5709,7 @@ fn render_youtube_grid_card(
             FontId::new(12.5, FontFamily::Proportional),
             BG_MAIN,
         );
-        return (resp.clicked(), false, false, false);
+        return (false, resp.clicked(), false, false);
     }
 
     // ---- 1A. VIDEO / PLAYLIST CARD ----
@@ -5639,6 +6136,11 @@ fn run_self_test() -> i32 {
         && v_player.get_target_vlc_volume() == 74
         && m_player.get_target_vlc_volume() == 34;
     let media_ok = v_player.is_available() && m_player.is_available() && audio_curve_ok;
+    let uri_ok = parse_litetube_or_youtube_url(
+        "litetube://play?url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3DdQw4w9WgXcQ%26t%3D125s",
+    ) == Some(("dQw4w9WgXcQ".to_string(), Some(125.0)))
+        && parse_litetube_or_youtube_url("https://youtu.be/dQw4w9WgXcQ?t=1m30s")
+            == Some(("dQw4w9WgXcQ".to_string(), Some(90.0)));
     let home_page = fetch_home_feed(&config, None);
     trim_memory();
     let ram_mb = get_current_ram_usage_mb();
@@ -5646,7 +6148,7 @@ fn run_self_test() -> i32 {
     log_info(
         "SELFTEST",
         &format!(
-            "Resumo: VaultOk={} | RealDpapi={} | SapisidOk={} | RedactOk={} | Carousel={} | PlsOk={} | MusicPlsOk={} | MusicTracksOk={} | SbOk={} | CodecOk={} | AudioCurveOk={} | MediaOk={} | HomeItems={} (Auth={}) | RAM={:.1}MB",
+            "Resumo: VaultOk={} | RealDpapi={} | SapisidOk={} | RedactOk={} | Carousel={} | PlsOk={} | MusicPlsOk={} | MusicTracksOk={} | SbOk={} | CodecOk={} | AudioCurveOk={} | MediaOk={} | UriOk={} | HomeItems={} (Auth={}) | RAM={:.1}MB",
             vault_ok,
             real_vault_present,
             sapisid_ok,
@@ -5659,6 +6161,7 @@ fn run_self_test() -> i32 {
             cascade_ok,
             audio_curve_ok,
             media_ok,
+            uri_ok,
             home_page.items.len(),
             home_page.used_account_auth,
             ram_mb
@@ -5674,6 +6177,7 @@ fn run_self_test() -> i32 {
         && sb_ok
         && cascade_ok
         && media_ok
+        && uri_ok
     {
         log_info("SELFTEST", "Validação automatizada concluída com 0 falhas!");
         0
@@ -5690,9 +6194,18 @@ fn main() -> eframe::Result<()> {
         std::process::exit(code);
     }
 
-    init_logger();
-
     let startup_url = args.iter().skip(1).find(|a| !a.starts_with('-')).cloned();
+
+    // Instância única: se recebeu URL externa (litetube:// ou YouTube) e já existe um LiteTube aberto,
+    // encaminha via Named Pipe e encerra imediatamente sem abrir segunda janela.
+    if let Some(ref url) = startup_url {
+        if try_send_ipc_play_url(url) {
+            return Ok(());
+        }
+    }
+
+    init_logger();
+    register_litetube_protocol();
 
     let icon_data = load_app_icon();
     let mut viewport = egui::ViewportBuilder::default()

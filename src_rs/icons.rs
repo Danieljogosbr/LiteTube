@@ -366,38 +366,116 @@ pub fn draw_speaker(painter: &egui::Painter, center: Pos2, size: f32, color: Col
 }
 
 pub fn draw_shuffle(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
-    let r = size * 0.45;
-    let st = Stroke::new(1.6_f32, color);
-    painter.line_segment(
-        [
-            Pos2::new(center.x - r * 0.85, center.y - r * 0.55),
-            Pos2::new(center.x + r * 0.80, center.y + r * 0.55),
+    let r = size * 0.46;
+    let st = Stroke::new(1.65_f32, color);
+    let y_top = center.y - r * 0.48;
+    let y_bot = center.y + r * 0.48;
+    let x_l = center.x - r * 0.88;
+    let x_m1 = center.x - r * 0.28;
+    let x_m2 = center.x + r * 0.26;
+    let x_r = center.x + r * 0.72;
+    let tip_x = center.x + r * 0.94;
+    let ah = r * 0.30;
+
+    // Caminho 1 (superior-esquerda -> inferior-direita) com seta à direita
+    painter.add(egui::Shape::line(
+        vec![
+            Pos2::new(x_l, y_top),
+            Pos2::new(x_m1, y_top),
+            Pos2::new(x_m2, y_bot),
+            Pos2::new(x_r, y_bot),
         ],
         st,
-    );
-    painter.line_segment(
-        [
-            Pos2::new(center.x - r * 0.85, center.y + r * 0.55),
-            Pos2::new(center.x + r * 0.80, center.y - r * 0.55),
+    ));
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            Pos2::new(tip_x, y_bot),
+            Pos2::new(x_r - r * 0.08, y_bot - ah),
+            Pos2::new(x_r - r * 0.08, y_bot + ah),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+
+    // Caminho 2 (inferior-esquerda -> superior-direita) com seta à direita
+    painter.add(egui::Shape::line(
+        vec![
+            Pos2::new(x_l, y_bot),
+            Pos2::new(x_m1, y_bot),
+            Pos2::new(x_m2, y_top),
+            Pos2::new(x_r, y_top),
         ],
         st,
-    );
+    ));
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            Pos2::new(tip_x, y_top),
+            Pos2::new(x_r - r * 0.08, y_top - ah),
+            Pos2::new(x_r - r * 0.08, y_top + ah),
+        ],
+        color,
+        Stroke::NONE,
+    ));
 }
 
 pub fn draw_repeat(painter: &egui::Painter, center: Pos2, size: f32, color: Color32, repeat_one: bool) {
-    let r = size * 0.44;
-    let st = Stroke::new(1.6_f32, color);
-    let rect = Rect::from_center_size(center, Vec2::new(r * 1.65, r * 1.15));
-    painter.rect_stroke(rect, CornerRadius::same(4), st, egui::StrokeKind::Inside);
+    let r = size * 0.46;
+    let st = Stroke::new(1.65_f32, color);
+    let y_top = center.y - r * 0.50;
+    let y_bot = center.y + r * 0.50;
+    let x_l = center.x - r * 0.78;
+    let x_r = center.x + r * 0.78;
+    let cr = r * 0.28;
+    let ah = r * 0.30;
+
+    // Arco superior: sobe à esquerda -> segue para a direita -> ponta de seta para a direita
+    painter.add(egui::Shape::line(
+        vec![
+            Pos2::new(x_l, center.y - r * 0.06),
+            Pos2::new(x_l, y_top + cr),
+            Pos2::new(x_l + cr, y_top),
+            Pos2::new(x_r - r * 0.08, y_top),
+        ],
+        st,
+    ));
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            Pos2::new(x_r + r * 0.16, y_top),
+            Pos2::new(x_r - r * 0.22, y_top - ah),
+            Pos2::new(x_r - r * 0.22, y_top + ah),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+
+    // Arco inferior: desce à direita -> segue para a esquerda -> ponta de seta para a esquerda
+    painter.add(egui::Shape::line(
+        vec![
+            Pos2::new(x_r, center.y + r * 0.06),
+            Pos2::new(x_r, y_bot - cr),
+            Pos2::new(x_r - cr, y_bot),
+            Pos2::new(x_l + r * 0.08, y_bot),
+        ],
+        st,
+    ));
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            Pos2::new(x_l - r * 0.16, y_bot),
+            Pos2::new(x_l + r * 0.22, y_bot - ah),
+            Pos2::new(x_l + r * 0.22, y_bot + ah),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+
+    // "1" limpo centralizado dentro do loop quando em modo Repetir Uma
     if repeat_one {
-        let badge_c = Pos2::new(center.x + r * 0.65, center.y - r * 0.55);
-        painter.circle_filled(badge_c, 5.5, Color32::from_rgb(255, 0, 51));
         painter.text(
-            badge_c,
+            Pos2::new(center.x, center.y + 0.5),
             egui::Align2::CENTER_CENTER,
             "1",
-            egui::FontId::new(8.5, egui::FontFamily::Proportional),
-            Color32::WHITE,
+            egui::FontId::new((size * 0.50).max(8.5), egui::FontFamily::Proportional),
+            color,
         );
     }
 }
