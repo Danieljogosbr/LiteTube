@@ -1954,6 +1954,7 @@ impl LiteTubeApp {
                     if let Some(ref cur) = self.current_video {
                         if cur.id.eq_ignore_ascii_case(&video_id) {
                             self.current_video_storyboard = storyboard;
+                            self.last_storyboard_req_sec = -10.0;
                         }
                     }
                 }
@@ -1968,8 +1969,13 @@ impl LiteTubeApp {
                             [width as usize, height as usize],
                             &rgba,
                         );
-                        let tex = ctx.load_texture("sb_preview", img, TextureOptions::LINEAR);
-                        self.storyboard_preview_tex = Some((hover_sec, tex));
+                        if let Some((ref mut prev_sec, ref mut tex)) = self.storyboard_preview_tex {
+                            tex.set(img, TextureOptions::LINEAR);
+                            *prev_sec = hover_sec;
+                        } else {
+                            let tex = ctx.load_texture("sb_preview", img, TextureOptions::LINEAR);
+                            self.storyboard_preview_tex = Some((hover_sec, tex));
+                        }
                     }
                 }
                 AsyncMessage::MusicStreamResolved {
@@ -4475,7 +4481,7 @@ impl LiteTubeApp {
         hover_sec: f64,
     ) {
         if let Some(ref sb) = self.current_video_storyboard {
-            if (hover_sec - self.last_storyboard_req_sec).abs() > 1.5 {
+            if (hover_sec - self.last_storyboard_req_sec).abs() > 0.75 {
                 self.last_storyboard_req_sec = hover_sec;
                 let sb_clone = sb.clone();
                 let cache_clone = self.storyboard_sheet_cache.clone();
@@ -6219,6 +6225,11 @@ fn run_self_test() -> i32 {
     ) == Some(("dQw4w9WgXcQ".to_string(), Some(125.0)))
         && parse_litetube_or_youtube_url("https://youtu.be/dQw4w9WgXcQ?t=1m30s")
             == Some(("dQw4w9WgXcQ".to_string(), Some(90.0)));
+    let storyboard_cache = Mutex::new(HashMap::new());
+    let storyboard_ok = fetch_storyboard_data("dQw4w9WgXcQ", 212.0)
+        .and_then(|sb| fetch_cropped_storyboard_frame(&sb, 30.0, &storyboard_cache))
+        .map(|(w, h, rgba)| w > 0 && h > 0 && rgba.len() == (w * h * 4) as usize)
+        .unwrap_or(false);
     let home_page = fetch_home_feed(&config, None);
     trim_memory();
     let ram_mb = get_current_ram_usage_mb();
@@ -6226,7 +6237,7 @@ fn run_self_test() -> i32 {
     log_info(
         "SELFTEST",
         &format!(
-            "Resumo: VaultOk={} | RealDpapi={} | SapisidOk={} | RedactOk={} | Carousel={} | PlsOk={} | MusicPlsOk={} | MusicTracksOk={} | SbOk={} | CodecOk={} | AudioCurveOk={} | MediaOk={} | UriOk={} | HomeItems={} (Auth={}) | RAM={:.1}MB",
+            "Resumo: VaultOk={} | RealDpapi={} | SapisidOk={} | RedactOk={} | Carousel={} | PlsOk={} | MusicPlsOk={} | MusicTracksOk={} | SbOk={} | StoryboardOk={} | CodecOk={} | AudioCurveOk={} | MediaOk={} | UriOk={} | HomeItems={} (Auth={}) | RAM={:.1}MB",
             vault_ok,
             real_vault_present,
             sapisid_ok,
@@ -6236,6 +6247,7 @@ fn run_self_test() -> i32 {
             music_pls_ok,
             music_tracks_ok,
             sb_ok,
+            storyboard_ok,
             cascade_ok,
             audio_curve_ok,
             media_ok,
@@ -6253,6 +6265,7 @@ fn run_self_test() -> i32 {
         && music_pls_ok
         && music_tracks_ok
         && sb_ok
+        && storyboard_ok
         && cascade_ok
         && media_ok
         && uri_ok

@@ -229,25 +229,60 @@ pub fn fetch_storyboard_data(video_id: &str, duration_seconds: f64) -> Option<St
     }
 
     let payload = format!(
-        "{{\"context\":{{\"client\":{{\"clientName\":\"WEB\",\"clientVersion\":\"2.20240726.00.00\",\"hl\":\"pt\",\"gl\":\"BR\"}}}},\"videoId\":\"{}\"}}",
+        "{{\"context\":{{\"client\":{{\"clientName\":\"ANDROID_VR\",\"clientVersion\":\"1.60.19\",\"deviceMake\":\"Oculus\",\"deviceModel\":\"Quest 3\",\"osName\":\"Android\",\"osVersion\":\"12L\",\"androidSdkVersion\":32,\"hl\":\"pt\",\"gl\":\"BR\"}}}},\"videoId\":\"{}\",\"contentCheckOk\":true,\"racyCheckOk\":true}}",
         vid
     );
-    let headers = HashMap::new();
-    let json = http_post_json(
+    let mut headers = HashMap::new();
+    headers.insert(
+        "User-Agent".to_string(),
+        "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip".to_string(),
+    );
+    headers.insert("X-YouTube-Client-Name".to_string(), "28".to_string());
+    headers.insert("X-YouTube-Client-Version".to_string(), "1.60.19".to_string());
+
+    let rx_spec = Regex::new(r#""playerStoryboardSpecRenderer"\s*:\s*\{\s*"spec"\s*:\s*"((?:[^"\\]|\\.)*)""#).ok()?;
+    let rx_spec_fallback = Regex::new(r#""spec"\s*:\s*"(https?:\\?/\\?/i\.ytimg\.com\\?/sb\\?/[^"]+)""#).ok()?;
+
+    let mut raw_spec = String::new();
+    if let Some(json) = http_post_json(
         "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
         &payload,
         Some(&format!("https://www.youtube.com/watch?v={}", vid)),
         &headers,
-    )?;
+    ) {
+        if let Some(m) = rx_spec
+            .captures(&json)
+            .or_else(|| rx_spec_fallback.captures(&json))
+            .and_then(|c| c.get(1))
+        {
+            raw_spec = m
+                .as_str()
+                .replace("\\u0026", "&")
+                .replace("\\/", "/")
+                .replace("&amp;", "&");
+        }
+    }
 
-    let rx = Regex::new(r#""spec"\s*:\s*"((?:[^"\\]|\\.)*)""#).ok()?;
-    let caps = rx.captures(&json)?;
-    let raw_spec = caps
-        .get(1)?
-        .as_str()
-        .replace("\\u0026", "&")
-        .replace("\\/", "/")
-        .replace("&amp;", "&");
+    // Fallback: extrai playerStoryboardSpecRenderer diretamente do HTML da watch page
+    if raw_spec.is_empty() {
+        if let Some(html) = http_get_text(&format!("https://www.youtube.com/watch?v={}", vid)) {
+            if let Some(m) = rx_spec
+                .captures(&html)
+                .or_else(|| rx_spec_fallback.captures(&html))
+                .and_then(|c| c.get(1))
+            {
+                raw_spec = m
+                    .as_str()
+                    .replace("\\u0026", "&")
+                    .replace("\\/", "/")
+                    .replace("&amp;", "&");
+            }
+        }
+    }
+
+    if raw_spec.is_empty() {
+        return None;
+    }
 
     let sb = parse_storyboard_spec(vid, &raw_spec, duration_seconds)?;
     if let Ok(mut guard) = cache.lock() {
@@ -266,7 +301,7 @@ pub fn fetch_storyboard_data(video_id: &str, duration_seconds: f64) -> Option<St
     Some(sb)
 }
 
-fn parse_storyboard_spec(
+pub fn parse_storyboard_spec(
     video_id: &str,
     spec: &str,
     fallback_duration_sec: f64,
@@ -276,61 +311,61 @@ fn parse_storyboard_spec(
         return None;
     }
     let base_url = parts[0];
-    let level_index = parts.len() - 1;
-    let level_num = level_index - 1;
-    let fields: Vec<&str> = parts[level_index].split('#').collect();
-    if fields.len() < 8 {
-        return None;
-    }
 
-    let w = fields[0].parse::<u32>().ok()?;
-    let h = fields[1].parse::<u32>().ok()?;
-    let count = fields[2].parse::<u32>().ok()?;
-    let cols = fields[3].parse::<u32>().ok()?;
-    let rows = fields[4].parse::<u32>().ok()?;
-    let interval_ms = fields[5].parse::<u32>().unwrap_or(2000);
-    let name_pattern = fields[6];
-    let sigh = fields[7];
+    for level_index in (1..parts.len()).rev() {
+        let level_num = level_index - 1;
+        let fields: Vec<&str> = parts[level_index].split('#').collect();
+        if fields.len() < 8 {
+            continue;
+        }
 
-    if w == 0 || h == 0 || count == 0 || cols == 0 || rows == 0 {
-        return None;
-    }
+        let Ok(w) = fields[0].parse::<u32>() else { continue };
+        let Ok(h) = fields[1].parse::<u32>() else { continue };
+        let Ok(count) = fields[2].parse::<u32>() else { continue };
+        let Ok(cols) = fields[3].parse::<u32>() else { continue };
+        let Ok(rows) = fields[4].parse::<u32>() else { continue };
+        let interval_ms = fields[5].parse::<u32>().unwrap_or(2000);
+        let name_pattern = fields[6];
+        let sigh = fields[7];
 
-    let mut url_template = base_url
-        .replace("$L", &level_num.to_string())
-        .replace("$N", name_pattern);
+        if w == 0 || h == 0 || count == 0 || cols == 0 || rows == 0 {
+            continue;
+        }
 
-    if !sigh.is_empty() && !url_template.contains("sigh=") && !url_template.contains("rs=") {
-        let sep = if url_template.contains('?') { '&' } else { '?' };
-        let param = if sigh.starts_with("rs$") || sigh.starts_with("AOn") {
-            "rs"
+        let mut url_template = base_url
+            .replace("$L", &level_num.to_string())
+            .replace("$N", name_pattern);
+
+        // CRÍTICO: O YouTube exige `&sigh={sigh}` (mesmo quando `sigh` começa com `rs$AOn...`).
+        // Enviar `&rs=rs$AOn...` retorna HTTP 403 Forbidden no i.ytimg.com!
+        if !sigh.is_empty() && !url_template.contains("sigh=") && !url_template.contains("rs=") {
+            let sep = if url_template.contains('?') { '&' } else { '?' };
+            url_template = format!("{}{}sigh={}", url_template, sep, sigh);
+        }
+
+        let calc_dur = if interval_ms > 0 {
+            (count as f64 * interval_ms as f64) / 1000.0
         } else {
-            "sigh"
-        };
-        url_template = format!("{}{}{}={}", url_template, sep, param, sigh);
-    }
-
-    let calc_dur = if interval_ms > 0 {
-        (count as f64 * interval_ms as f64) / 1000.0
-    } else {
-        fallback_duration_sec
-    };
-
-    Some(StoryboardData {
-        video_id: video_id.to_string(),
-        url_template,
-        frame_width: w,
-        frame_height: h,
-        total_frames: count,
-        cols,
-        rows,
-        interval_ms,
-        duration_seconds: if fallback_duration_sec > 0.0 {
             fallback_duration_sec
-        } else {
-            calc_dur
-        },
-    })
+        };
+
+        return Some(StoryboardData {
+            video_id: video_id.to_string(),
+            url_template,
+            frame_width: w,
+            frame_height: h,
+            total_frames: count,
+            cols,
+            rows,
+            interval_ms,
+            duration_seconds: if fallback_duration_sec > 0.0 {
+                fallback_duration_sec
+            } else {
+                calc_dur
+            },
+        });
+    }
+    None
 }
 
 /// Baixa e recorta em RGBA (largura, altura, pixels) o quadro do Storyboard para exibição no Scrubber.
