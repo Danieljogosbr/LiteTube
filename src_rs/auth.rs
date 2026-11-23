@@ -349,20 +349,20 @@ impl GoogleSessionService {
     }
 
     pub fn resolve_cookie_header(&self, config: &AppConfig) -> String {
-        if let Ok(guard) = self.cached_cookie_header.lock() {
-            if let Some((ref hdr, ts)) = *guard {
-                if ts.elapsed() < Duration::from_secs(120) && !hdr.is_empty() {
-                    return hdr.clone();
-                }
+        let mut guard = self
+            .cached_cookie_header
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some((ref hdr, ts)) = *guard {
+            if ts.elapsed() < Duration::from_secs(120) && !hdr.is_empty() {
+                return hdr.clone();
             }
         }
 
         if let Some(plain) = load_cookies_plaintext(&config.cookies_file_path) {
             let hdr = parse_netscape_cookies_to_header(&plain);
             if !hdr.is_empty() {
-                if let Ok(mut guard) = self.cached_cookie_header.lock() {
-                    *guard = Some((hdr.clone(), Instant::now()));
-                }
+                *guard = Some((hdr.clone(), Instant::now()));
                 return hdr;
             }
         }

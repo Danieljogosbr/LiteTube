@@ -785,8 +785,8 @@ impl LiteTubeApp {
         let config = AppConfig::load();
         let ram = get_current_ram_usage_mb();
 
-        let video_player = Arc::new(RustMediaPlayer::new(false));
-        let music_player = Arc::new(RustMediaPlayer::new(true));
+        let video_player = Arc::new(RustMediaPlayer::new_deferred(false));
+        let music_player = Arc::new(RustMediaPlayer::new_deferred(true));
         video_player.set_volume(config.video_volume, config.is_video_muted);
         music_player.set_volume(config.music_volume, config.is_music_muted);
         video_player.start_poller();
@@ -1034,9 +1034,11 @@ impl LiteTubeApp {
     fn refresh_account_profile(&mut self, force: bool) {
         let cfg = self.config.clone();
         let tx = self.tx.clone();
+        let ctx = self.egui_ctx.clone();
         thread::spawn(move || {
             let profile = GoogleSessionService::shared().get_account_profile(&cfg, force);
             let _ = tx.send(AsyncMessage::ProfileLoaded(profile));
+            request_repaint_if_window_visible(&ctx);
         });
     }
 
@@ -1085,6 +1087,7 @@ impl LiteTubeApp {
 
         let cfg = self.config.clone();
         let tx = self.tx.clone();
+        let ctx = self.egui_ctx.clone();
         let pl_id = self
             .opened_video_playlist
             .as_ref()
@@ -1108,6 +1111,7 @@ impl LiteTubeApp {
                 page,
                 append,
             });
+            request_repaint_if_window_visible(&ctx);
         });
     }
 
@@ -1174,58 +1178,62 @@ impl LiteTubeApp {
 
         let cfg = self.config.clone();
         let tx = self.tx.clone();
+        let ctx = self.egui_ctx.clone();
         let pl_id = self
             .opened_music_playlist
             .as_ref()
             .map(|p| p.playlist_id.clone())
             .unwrap_or_default();
 
-        thread::spawn(move || match section {
-            MusicNavSection::Recommended => {
-                let (items, status) = fetch_personalized_music_feed(&cfg);
-                let _ = tx.send(AsyncMessage::MusicFeedLoaded {
-                    request_id: req_id,
-                    section,
-                    items,
-                    status,
-                    continuation: String::new(),
-                    append: false,
-                });
+        thread::spawn(move || {
+            match section {
+                MusicNavSection::Recommended => {
+                    let (items, status) = fetch_personalized_music_feed(&cfg);
+                    let _ = tx.send(AsyncMessage::MusicFeedLoaded {
+                        request_id: req_id,
+                        section,
+                        items,
+                        status,
+                        continuation: String::new(),
+                        append: false,
+                    });
+                }
+                MusicNavSection::Explore => {
+                    let (items, status) = fetch_music_explore_feed(&cfg);
+                    let _ = tx.send(AsyncMessage::MusicFeedLoaded {
+                        request_id: req_id,
+                        section,
+                        items,
+                        status,
+                        continuation: String::new(),
+                        append: false,
+                    });
+                }
+                MusicNavSection::AccountPlaylists => {
+                    let page = fetch_music_account_playlists(&cfg, cont.as_deref());
+                    let _ = tx.send(AsyncMessage::MusicFeedLoaded {
+                        request_id: req_id,
+                        section,
+                        items: page.items,
+                        status: page.status_message,
+                        continuation: page.continuation_token,
+                        append,
+                    });
+                }
+                MusicNavSection::AccountPlaylistTracks => {
+                    let page = fetch_music_playlist_items(&pl_id, &cfg, cont.as_deref());
+                    let _ = tx.send(AsyncMessage::MusicFeedLoaded {
+                        request_id: req_id,
+                        section,
+                        items: page.items,
+                        status: page.status_message,
+                        continuation: page.continuation_token,
+                        append,
+                    });
+                }
+                _ => {}
             }
-            MusicNavSection::Explore => {
-                let (items, status) = fetch_music_explore_feed(&cfg);
-                let _ = tx.send(AsyncMessage::MusicFeedLoaded {
-                    request_id: req_id,
-                    section,
-                    items,
-                    status,
-                    continuation: String::new(),
-                    append: false,
-                });
-            }
-            MusicNavSection::AccountPlaylists => {
-                let page = fetch_music_account_playlists(&cfg, cont.as_deref());
-                let _ = tx.send(AsyncMessage::MusicFeedLoaded {
-                    request_id: req_id,
-                    section,
-                    items: page.items,
-                    status: page.status_message,
-                    continuation: page.continuation_token,
-                    append,
-                });
-            }
-            MusicNavSection::AccountPlaylistTracks => {
-                let page = fetch_music_playlist_items(&pl_id, &cfg, cont.as_deref());
-                let _ = tx.send(AsyncMessage::MusicFeedLoaded {
-                    request_id: req_id,
-                    section,
-                    items: page.items,
-                    status: page.status_message,
-                    continuation: page.continuation_token,
-                    append,
-                });
-            }
-            _ => {}
+            request_repaint_if_window_visible(&ctx);
         });
     }
 
@@ -1243,6 +1251,7 @@ impl LiteTubeApp {
         let is_music = self.active_env == ActiveEnvironment::Music;
         let cfg = self.config.clone();
         let tx = self.tx.clone();
+        let ctx = self.egui_ctx.clone();
 
         if is_music {
             if append && self.music_is_loading_feed {
@@ -1276,6 +1285,7 @@ impl LiteTubeApp {
                     query: q,
                     append,
                 });
+                request_repaint_if_window_visible(&ctx);
             });
         } else {
             if append && self.video_is_loading_feed {
@@ -1311,6 +1321,7 @@ impl LiteTubeApp {
                     query: q,
                     append,
                 });
+                request_repaint_if_window_visible(&ctx);
             });
         }
     }
@@ -1331,6 +1342,7 @@ impl LiteTubeApp {
         let tab_owned = tab.to_string();
         let cfg = self.config.clone();
         let tx = self.tx.clone();
+        let ctx = self.egui_ctx.clone();
 
         thread::spawn(move || {
             let data = fetch_channel_page(&cid, &cname, &tab_owned, &cfg);
@@ -1338,6 +1350,7 @@ impl LiteTubeApp {
                 request_id: req_id,
                 data,
             });
+            request_repaint_if_window_visible(&ctx);
         });
     }
 
@@ -1442,6 +1455,7 @@ impl LiteTubeApp {
 
         let cfg = self.config.clone();
         let tx = self.tx.clone();
+        let ctx = self.egui_ctx.clone();
         let vid_clone = video.clone();
 
         thread::spawn(move || {
@@ -1452,6 +1466,7 @@ impl LiteTubeApp {
                 result: res,
                 resume_sec,
             });
+            request_repaint_if_window_visible(&ctx);
         });
 
         if !is_same_video {
@@ -1464,6 +1479,7 @@ impl LiteTubeApp {
         let dur_sec = video.duration_seconds as f64;
         let cfg = self.config.clone();
         let tx1 = self.tx.clone();
+        let ctx1 = self.egui_ctx.clone();
 
         thread::spawn(move || {
             let meta = fetch_video_metadata(&vid_id, &cfg);
@@ -1481,28 +1497,33 @@ impl LiteTubeApp {
                 related: next_details.related_videos,
                 sub_count: next_details.subscriber_count_text,
             });
+            request_repaint_if_window_visible(&ctx1);
         });
 
         if self.config.enable_sponsor_block {
             let vid_id2 = video.id.clone();
             let tx2 = self.tx.clone();
+            let ctx2 = self.egui_ctx.clone();
             thread::spawn(move || {
                 let segs = get_video_sponsor_segments(&vid_id2);
                 let _ = tx2.send(AsyncMessage::VideoSponsorLoaded {
                     video_id: vid_id2,
                     segments: segs,
                 });
+                request_repaint_if_window_visible(&ctx2);
             });
         }
 
         let vid_id3 = video.id.clone();
         let tx3 = self.tx.clone();
+        let ctx3 = self.egui_ctx.clone();
         thread::spawn(move || {
             let sb = fetch_storyboard_data(&vid_id3, dur_sec);
             let _ = tx3.send(AsyncMessage::VideoStoryboardLoaded {
                 video_id: vid_id3,
                 storyboard: sb,
             });
+            request_repaint_if_window_visible(&ctx3);
         });
     }
 
@@ -4448,7 +4469,7 @@ impl LiteTubeApp {
     fn render_storyboard_hover_tooltip(
         &mut self,
         painter: &egui::Painter,
-        _ctx: &egui::Context,
+        ctx: &egui::Context,
         anchor: Pos2,
         stage_rect: Rect,
         hover_sec: f64,
@@ -4459,6 +4480,7 @@ impl LiteTubeApp {
                 let sb_clone = sb.clone();
                 let cache_clone = self.storyboard_sheet_cache.clone();
                 let tx = self.tx.clone();
+                let ctx_clone = ctx.clone();
                 thread::spawn(move || {
                     if let Some((w, h, rgba)) =
                         fetch_cropped_storyboard_frame(&sb_clone, hover_sec, &cache_clone)
@@ -4469,6 +4491,7 @@ impl LiteTubeApp {
                             height: h,
                             rgba,
                         });
+                        request_repaint_if_window_visible(&ctx_clone);
                     }
                 });
             }
@@ -5331,12 +5354,14 @@ impl LiteTubeApp {
                             self.auth_modal_status = format!("Extraindo sessão do {}...", lbl);
                             let b = id.to_string();
                             let tx = self.tx.clone();
+                            let ctx_clone = ctx.clone();
                             thread::spawn(move || {
                                 let res = extract_cookies_from_browser(&b);
                                 let _ = tx.send(AsyncMessage::BrowserCookiesExtracted {
                                     browser: b,
                                     result: res,
                                 });
+                                request_repaint_if_window_visible(&ctx_clone);
                             });
                         }
                     }
@@ -5533,6 +5558,7 @@ impl LiteTubeApp {
                 if !list_id.is_empty() {
                     let cfg = self.config.clone();
                     let tx = self.tx.clone();
+                    let ctx_clone = ctx.clone();
                     self.status_text = "Importando playlist...".to_string();
                     thread::spawn(move || {
                         let page = fetch_music_playlist_items(&list_id, &cfg, None);
@@ -5541,6 +5567,7 @@ impl LiteTubeApp {
                             url: raw,
                             tracks: page.items,
                         });
+                        request_repaint_if_window_visible(&ctx_clone);
                     });
                 }
             }
@@ -6256,7 +6283,9 @@ fn main() -> eframe::Result<()> {
     }
 
     init_logger();
-    register_litetube_protocol();
+    thread::spawn(|| {
+        register_litetube_protocol();
+    });
 
     let icon_data = load_app_icon();
     let mut viewport = egui::ViewportBuilder::default()
